@@ -10,6 +10,7 @@
     "dist:mac": "electron-builder --mac"
   },
   "build": {
+    "publish": null,
     "appId": "com.mediadrop.desktop",
     "productName": "MediaDrop",
     "mac": {
@@ -34,14 +35,15 @@
       "preload.js",
       "app/**/*",
       "assets/**/*",
-      "!venv",
+      "!app/downloads/**",
       "!downloads",
+      "!venv",
       "!*.pyc",
       "!__pycache__"
     ],
     "extraResources": [
       {
-        "from": "../reclip/",
+        "from": "./app/",
         "to": "app",
         "filter": [
           "**/*",
