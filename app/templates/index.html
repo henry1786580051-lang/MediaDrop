@@ -740,7 +740,6 @@
               uploader: data.uploader || '',
               formats: data.formats || [],
               selectedFormatId: data.formats?.[0]?.id || null,
-              needs_cookies: data.needs_cookies || false,
             };
           }
         } catch (err) {
@@ -943,7 +942,6 @@
             format: c.format || 'video',
             format_id: c.selectedFormatId,
             title: c.title || '',
-            needs_cookies: c.needs_cookies || false,
           }),
         });
         const data = await res.json();

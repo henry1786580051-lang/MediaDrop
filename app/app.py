@@ -9,7 +9,6 @@ import sys
 import atexit
 
 from flask import Flask, request, jsonify, send_file, render_template
-import errno
 
 app = Flask(__name__)
 
@@ -77,7 +76,6 @@ def parse_progress(line):
     if not m:
         return None
     pct = float(m.group(1))
-    size_str = m.group(2)
     speed_str = m.group(3) if m.group(3) != "Unknown" else None
     eta_str = m.group(4) if m.group(4) != "Unknown" else None
     return {"percent": pct, "speed": speed_str, "eta": eta_str}
@@ -239,7 +237,6 @@ def get_info():
             return jsonify({"error": err_detail.split("\n")[-1]}), 400
 
         info = json.loads(result.stdout)
-        needs_cookies = False
     except subprocess.TimeoutExpired:
         return jsonify({"error": "Timed out fetching video info"}), 400
     except Exception as e:
@@ -270,7 +267,6 @@ def get_info():
         "duration": info.get("duration"),
         "uploader": info.get("uploader", ""),
         "formats": formats,
-        "needs_cookies": needs_cookies,
     })
 
 
@@ -281,7 +277,6 @@ def start_download():
     format_choice = data.get("format", "video")
     format_id = data.get("format_id")
     title = data.get("title", "")
-    needs_cookies = data.get("needs_cookies", False)
 
     if not url:
         return jsonify({"error": "No URL provided"}), 400
@@ -342,7 +337,6 @@ def pause_download(job_id):
     proc = job["proc"]
     if proc.poll() is not None:
         return jsonify({"error": "Process already finished"}), 400
-    import signal
     try:
         if job.get("paused"):
             proc.send_signal(signal.SIGCONT)
