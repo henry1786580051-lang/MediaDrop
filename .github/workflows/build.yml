@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'V*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '替换哪个 Release 的安装包（如 V1.0.0）'
+        required: true
 
 jobs:
   build:
@@ -61,8 +66,21 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Create GitHub Release
+      - name: Delete old assets from existing release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.release_tag }}"
+          echo "Replacing assets on release: $TAG"
+          gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name' | while read -r name; do
+            gh release delete-asset "$TAG" "$name" --repo "${{ github.repository }}" --yes
+          done
+
+      - name: Create or update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          name: ${{ github.event.inputs.release_tag || github.ref_name }}
           files: artifacts/**/*
           generate_release_notes: true
