@@ -106,7 +106,7 @@ brew install yt-dlp ffmpeg python3
 ```bash
 git clone https://github.com/henry1786580051-lang/MediaDrop.git
 cd MediaDrop/app
-./reclip.sh
+./start.sh
 ```
 
 浏览器打开 **http://localhost:8899** 即可使用。
@@ -201,7 +201,7 @@ MediaDrop/
 ├── package.json               # Node.js 配置与构建脚本
 ├── app/                       # Flask 后端 + 前端
 │   ├── app.py                 # Flask 服务端（~150 行）
-│   ├── reclip.sh              # 一键启动脚本
+│   ├── start.sh               # 一键启动脚本
 │   ├── requirements.txt       # Python 依赖
 │   ├── Dockerfile             # Docker 构建文件
 │   ├── templates/
