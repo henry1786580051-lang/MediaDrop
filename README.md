@@ -4,11 +4,11 @@
 ![Python](https://img.shields.io/badge/Python-3.8+-3776AB?logo=python&logoColor=white)
 ![Flask](https://img.shields.io/badge/Flask-3.0-000000?logo=flask&logoColor=white)
 ![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white)
-![Platform](https://img.shields.io/badge/platform-macOS-lightgrey?logo=apple)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)
 
 一个简洁优雅的视频 / 音频下载器，支持 YouTube、TikTok、Instagram、Twitter/X 等 1000+ 网站，一键下载为 MP4、MP3 或 JPG。
 
-> **👉 [下载桌面应用](https://github.com/henry1786580051-lang/MediaDrop/releases/tag/V1.0.0)**，macOS 一键安装，开箱即用。
+> **👉 [下载桌面应用](https://github.com/henry1786580051-lang/MediaDrop/releases/tag/V1.0.0)**，macOS / Windows 一键安装，开箱即用。
 
 <p align="center">
   <img src="app/assets/preview.png" alt="MediaDrop 界面预览" width="80%" />
@@ -48,9 +48,9 @@
 
 ### 🖥️ 桌面应用
 
-- 🍎 macOS 原生桌面应用（Electron 封装）
+- 🍎 macOS / 🪟 Windows 原生桌面应用（Electron 封装）
 - 🚀 一键启动，自动管理后端服务
-- 📦 DMG 安装包，拖拽即装
+- 📦 DMG / EXE 安装包，开箱即用
 
 ---
 
@@ -63,13 +63,32 @@
 | 平台 | 架构 | 文件 | 大小 |
 |------|------|------|------|
 | **macOS** | Apple Silicon (M1+) | `MediaDrop.dmg` | ~95MB |
+| **Windows** | x64（绝大多数电脑） | `MediaDrop Setup 1.0.0.exe` | ~81MB |
+| **Windows** | ARM64（Surface 等） | `MediaDrop Setup 1.0.0 arm64.exe` | ~86MB |
 
-> 💡 **安装步骤**：
-> 1. 下载 `MediaDrop.dmg` 文件
-> 2. 双击打开 DMG，将 MediaDrop 拖入 Applications 文件夹
-> 3. 在启动台或 Applications 中找到 MediaDrop 并打开
->
-> ⚠️ 首次打开可能提示"无法验证开发者"，请在 **系统设置 → 隐私与安全性** 中点击「仍要打开」。
+> 💡 **不确定用哪个版本？**
+> - **Mac 用户**：下载 `MediaDrop.dmg`（仅支持 Apple Silicon / M1+）
+> - **Windows 用户**：下载 `MediaDrop Setup 1.0.0.exe`（x64，兼容绝大多数 Windows 电脑）
+
+<details>
+<summary><strong>🍎 macOS 安装说明</strong></summary>
+
+1. 下载 `MediaDrop.dmg` 文件
+2. 双击打开 DMG，将 MediaDrop 拖入 Applications 文件夹
+3. 在启动台或 Applications 中找到 MediaDrop 并打开
+
+⚠️ 首次打开可能提示"无法验证开发者"，请在 **系统设置 → 隐私与安全性** 中点击「仍要打开」。
+
+</details>
+
+<details>
+<summary><strong>🪟 Windows 安装说明</strong></summary>
+
+1. 下载对应架构的 `.exe` 安装包
+2. 双击运行，按提示完成安装
+3. 从开始菜单或桌面快捷方式启动 MediaDrop
+
+</details>
 
 ### 方式二：Web 版（开发者）
 
