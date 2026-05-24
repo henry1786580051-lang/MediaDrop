@@ -1,0 +1,1028 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MediaDrop — Free Media Downloader</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f4f1eb;
+      --fg: #3a3a38;
+      --accent: #e85d2a;
+      --accent-hover: #d04e1f;
+      --muted: #9c9889;
+      --card: #fff;
+      --card-border: #e2ded6;
+      --success: #2d8a4e;
+      --error: #c43d3d;
+      --radius: 14px;
+      --shimmer: linear-gradient(90deg, #ebe8e2 25%, #f0ede7 50%, #ebe8e2 75%);
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'DM Mono', monospace;
+      background: var(--bg);
+      color: var(--fg);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      opacity: 0.03;
+      pointer-events: none;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+      background-size: 128px;
+    }
+
+    .page {
+      max-width: 620px;
+      margin: 0 auto;
+      padding: 60px 24px 80px;
+    }
+
+    .brand { margin-bottom: 48px; }
+    .brand h1 {
+      font-family: 'Instrument Serif', serif;
+      font-size: 4.2rem;
+      font-weight: 400;
+      letter-spacing: -0.03em;
+      line-height: 1;
+      color: var(--fg);
+    }
+    .brand h1 em { font-style: italic; color: var(--accent); }
+    .brand p {
+      margin-top: 10px;
+      font-size: 0.78rem;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    textarea {
+      width: 100%;
+      padding: 18px 20px;
+      border: 1.5px solid var(--card-border);
+      border-radius: var(--radius);
+      background: var(--card);
+      color: var(--fg);
+      font-family: 'DM Mono', monospace;
+      font-size: 0.88rem;
+      outline: none;
+      resize: none;
+      min-height: 56px;
+      transition: border-color 0.25s, box-shadow 0.25s;
+      margin-bottom: 6px;
+    }
+    textarea:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(232, 93, 42, 0.08);
+    }
+    textarea::placeholder { color: var(--muted); }
+
+    .hint {
+      font-size: 0.7rem;
+      color: var(--muted);
+      margin-bottom: 20px;
+      letter-spacing: 0.02em;
+    }
+
+    .controls {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 6px;
+      align-items: center;
+    }
+
+    .fetch-btn {
+      flex: 1;
+      padding: 10px 20px;
+      border: none;
+      border-radius: 10px;
+      background: var(--accent);
+      color: #fff;
+      font-family: 'DM Mono', monospace;
+      font-size: 0.82rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s, transform 0.1s;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .fetch-btn:hover { background: var(--accent-hover); }
+    .fetch-btn:active { transform: scale(0.98); }
+    .fetch-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+    /* Cards */
+    .cards { margin-top: 24px; }
+
+    .card {
+      display: flex;
+      gap: 14px;
+      border: 1.5px solid var(--card-border);
+      border-radius: var(--radius);
+      background: var(--card);
+      padding: 14px;
+      margin-bottom: 10px;
+      animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    @keyframes slideUp {
+      from { opacity: 0; transform: translateY(12px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .card-thumb {
+      width: 120px;
+      min-width: 120px;
+      height: 80px;
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--card-border);
+      flex-shrink: 0;
+      position: relative;
+    }
+    .card-thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    /* No-thumbnail icon */
+    .card-thumb .no-thumb {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+    }
+    .card-thumb .no-thumb svg {
+      width: 28px;
+      height: 28px;
+      opacity: 0.5;
+    }
+
+    /* Shimmer skeleton for loading state */
+    .card-thumb.loading {
+      background: var(--shimmer);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s infinite;
+    }
+    .skeleton-line {
+      height: 12px;
+      border-radius: 4px;
+      background: var(--shimmer);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s infinite;
+      margin-bottom: 6px;
+    }
+    .skeleton-line.short { width: 40%; height: 10px; }
+    .skeleton-line.medium { width: 75%; }
+    @keyframes shimmer {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+
+    .card-body {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+    .card-title {
+      font-family: 'Instrument Serif', serif;
+      font-size: 1rem;
+      line-height: 1.3;
+      color: var(--fg);
+      margin-bottom: 2px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .card-meta {
+      font-size: 0.68rem;
+      color: var(--muted);
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+
+    .card-actions {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .card-actions .card-status.downloading {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .card-dl-btn {
+      padding: 6px 14px;
+      border: none;
+      border-radius: 7px;
+      background: var(--fg);
+      color: var(--bg);
+      font-family: 'DM Mono', monospace;
+      font-size: 0.7rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+    .card-dl-btn:hover { background: #2d2d2a; }
+    .card-dl-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .card-dl-btn.done { background: var(--success); color: #fff; }
+    .card-dl-btn.error { background: var(--error); color: #fff; }
+
+    .card-status {
+      font-size: 0.68rem;
+      color: var(--muted);
+    }
+    .card-status.downloading { color: var(--accent); }
+    .card-status.done { color: var(--success); }
+    .card-status.error { color: var(--error); }
+
+    .q-chip {
+      padding: 4px 10px;
+      border: 1.5px solid var(--card-border);
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted);
+      font-family: 'DM Mono', monospace;
+      font-size: 0.65rem;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .q-chip.active {
+      border-color: var(--fg);
+      color: var(--fg);
+      background: rgba(26,26,24,0.04);
+    }
+    .q-chip:hover:not(.active) { border-color: var(--muted); }
+
+    .fmt-pills {
+      display: flex;
+      gap: 0;
+      border: 1.5px solid var(--card-border);
+      border-radius: 8px;
+      overflow: hidden;
+      margin-bottom: 8px;
+    }
+    .fmt-pill {
+      padding: 6px 14px;
+      font-family: 'DM Mono', monospace;
+      font-size: 0.68rem;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      transition: all 0.2s;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+    .fmt-pill.active { background: var(--fg); color: var(--bg); }
+    .fmt-pill:not(.active):hover { color: var(--fg); }
+
+    .quality-row {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      width: 100%;
+      margin-top: 6px;
+    }
+
+    .done-btns {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .card-dl-btn.small {
+      padding: 4px 10px;
+      font-size: 0.6rem;
+    }
+    .card-dl-btn.cancel {
+      background: transparent;
+      color: var(--error);
+      border: 1px solid var(--error);
+    }
+    .dl-controls {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-top: 6px;
+    }
+
+    /* Error card */
+    .card.card-error {
+      border-color: rgba(196, 61, 61, 0.2);
+      background: rgba(196, 61, 61, 0.03);
+    }
+    .card-error-icon {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(196, 61, 61, 0.08);
+      color: var(--error);
+    }
+    .card-error-icon svg {
+      width: 24px;
+      height: 24px;
+    }
+    .card-error-msg {
+      font-size: 0.72rem;
+      color: var(--error);
+      margin-top: 2px;
+      line-height: 1.4;
+    }
+    .card-error-url {
+      font-size: 0.65rem;
+      color: var(--muted);
+      word-break: break-all;
+      margin-top: 4px;
+    }
+
+    /* Download all bar */
+    .dl-all-bar {
+      display: flex;
+      gap: 10px;
+      margin-top: 16px;
+    }
+    .dl-all-btn {
+      flex: 1;
+      padding: 12px;
+      border: none;
+      border-radius: 10px;
+      background: var(--fg);
+      color: var(--bg);
+      font-family: 'DM Mono', monospace;
+      font-size: 0.82rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .dl-all-btn:hover { background: #2d2d2a; }
+    .dl-all-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .spin {
+      display: inline-block;
+      width: 10px; height: 10px;
+      border: 2px solid currentColor;
+      border-right-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .footer {
+      margin-top: 48px;
+      text-align: center;
+      font-size: 0.68rem;
+      color: var(--muted);
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      line-height: 1.8;
+    }
+
+    /* Settings */
+    .settings {
+      margin-bottom: 20px;
+      border: 1.5px solid var(--card-border);
+      border-radius: var(--radius);
+      background: var(--card);
+      overflow: hidden;
+    }
+    .settings-toggle {
+      width: 100%;
+      padding: 10px 16px;
+      border: none;
+      background: transparent;
+      font-family: 'DM Mono', monospace;
+      font-size: 0.72rem;
+      color: var(--muted);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+    .settings-toggle:hover { color: var(--fg); }
+    .settings-toggle .arrow { transition: transform 0.2s; font-size: 0.6rem; }
+    .settings-toggle .arrow.open { transform: rotate(90deg); }
+    .settings-body { display: none; padding: 0 16px 14px; }
+    .settings-body.open { display: block; }
+    .settings-drop {
+      border: 1.5px dashed var(--card-border);
+      border-radius: 8px;
+      padding: 12px;
+      text-align: center;
+      font-size: 0.7rem;
+      color: var(--muted);
+      transition: border-color 0.2s, background 0.2s;
+      margin-bottom: 8px;
+    }
+    .settings-drop.drag-over {
+      border-color: var(--accent);
+      background: rgba(232, 93, 42, 0.04);
+      color: var(--accent);
+    }
+    .settings-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .settings-row input {
+      flex: 1;
+      padding: 8px 12px;
+      border: 1.5px solid var(--card-border);
+      border-radius: 8px;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: 'DM Mono', monospace;
+      font-size: 0.76rem;
+      outline: none;
+    }
+    .settings-row input:focus { border-color: var(--accent); }
+    .settings-row button {
+      padding: 8px 16px;
+      border: none;
+      border-radius: 8px;
+      background: var(--fg);
+      color: var(--bg);
+      font-family: 'DM Mono', monospace;
+      font-size: 0.72rem;
+      cursor: pointer;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .settings-row button:hover { background: #2d2d2a; }
+    .settings-row button.browse-btn {
+      background: transparent;
+      color: var(--fg);
+      border: 1.5px solid var(--card-border);
+    }
+    .settings-row button.browse-btn:hover { border-color: var(--fg); }
+    .settings-msg {
+      font-size: 0.65rem;
+      margin-top: 6px;
+      min-height: 1em;
+    }
+    .settings-msg.ok { color: var(--success); }
+    .settings-msg.err { color: var(--error); }
+
+    /* Progress bar */
+    .dl-progress { margin-top: 8px; }
+    .progress-bar-bg {
+      height: 6px;
+      background: var(--card-border);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 3px;
+      width: 0%;
+      transition: width 0.3s ease;
+    }
+    .progress-info {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 4px;
+      font-size: 0.65rem;
+      color: var(--muted);
+      letter-spacing: 0.02em;
+    }
+
+    /* Mobile */
+    @media (max-width: 500px) {
+      .brand h1 { font-size: 3rem; }
+      .page { padding: 40px 16px 60px; }
+      .card { flex-direction: column; gap: 10px; }
+      .card-thumb {
+        width: 100%;
+        min-width: unset;
+        height: 160px;
+      }
+      .card-title { white-space: normal; }
+      .controls { flex-wrap: wrap; }
+      .fetch-btn { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="brand">
+      <h1>Media<em>Drop</em></h1>
+      <p>Free media downloader</p>
+    </div>
+
+    <div class="settings">
+      <button class="settings-toggle" onclick="toggleSettings()">
+        <span class="arrow" id="settingsArrow">&#9654;</span> Settings
+      </button>
+      <div class="settings-body" id="settingsBody">
+        <div class="settings-drop" id="dropZone">Drop folder here</div>
+        <div class="settings-row">
+          <input id="dlPath" type="text" placeholder="Download path...">
+          <button class="browse-btn" onclick="browsePath()">Browse</button>
+          <button onclick="savePath()">Apply</button>
+        </div>
+        <div class="settings-msg" id="settingsMsg"></div>
+      </div>
+    </div>
+
+    <textarea id="urls" placeholder="Paste one or more URLs..." rows="2"></textarea>
+    <p class="hint">Multiple links? Separate with spaces, commas, or newlines.</p>
+
+    <div class="controls">
+      <button class="fetch-btn" id="goBtn" onclick="go()">Fetch</button>
+    </div>
+
+    <div id="cards" class="cards"></div>
+
+    <div class="footer">
+      YouTube &middot; TikTok &middot; Instagram &middot; Twitter/X &middot; Reddit &middot; Facebook<br>
+      Vimeo &middot; Twitch &middot; Dailymotion &middot; SoundCloud &middot; Loom &middot; Streamable<br>
+      Pinterest &middot; Tumblr &middot; Threads &middot; LinkedIn &middot; 1000+ more
+    </div>
+  </div>
+
+  <script>
+    let cardData = [];
+
+    // Settings
+    function toggleSettings() {
+      const body = document.getElementById('settingsBody');
+      const arrow = document.getElementById('settingsArrow');
+      body.classList.toggle('open');
+      arrow.classList.toggle('open');
+    }
+
+    async function loadPath() {
+      try {
+        const res = await fetch('/api/config');
+        const data = await res.json();
+        document.getElementById('dlPath').value = data.download_dir || '';
+      } catch {}
+    }
+
+    async function savePath() {
+      const input = document.getElementById('dlPath');
+      const msg = document.getElementById('settingsMsg');
+      try {
+        const res = await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ download_dir: input.value }),
+        });
+        const data = await res.json();
+        if (data.error) {
+          msg.className = 'settings-msg err';
+          msg.textContent = data.error;
+        } else {
+          msg.className = 'settings-msg ok';
+          msg.textContent = 'Path updated';
+          input.value = data.download_dir;
+          setTimeout(() => { msg.textContent = ''; }, 2000);
+        }
+      } catch (err) {
+        msg.className = 'settings-msg err';
+        msg.textContent = err.message;
+      }
+    }
+
+    loadPath();
+
+    async function browsePath() {
+      if (window.electronAPI && window.electronAPI.selectFolder) {
+        const folder = await window.electronAPI.selectFolder();
+        if (folder) {
+          document.getElementById('dlPath').value = folder;
+          savePath();
+        }
+      }
+    }
+
+    // Drag and drop
+    const dropZone = document.getElementById('dropZone');
+    dropZone.addEventListener('dragover', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      dropZone.classList.add('drag-over');
+    });
+    dropZone.addEventListener('dragleave', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      dropZone.classList.remove('drag-over');
+    });
+    dropZone.addEventListener('drop', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      dropZone.classList.remove('drag-over');
+      const files = e.dataTransfer.files;
+      if (files.length) {
+        let filePath = null;
+        if (window.electronAPI && window.electronAPI.getPathForFile) {
+          filePath = window.electronAPI.getPathForFile(files[0]);
+        } else {
+          filePath = files[0].path;
+        }
+        if (filePath) {
+          document.getElementById('dlPath').value = filePath;
+          savePath();
+        }
+      }
+    });
+
+    function fmtSize(bytes) {
+      if (!bytes) return '0 B';
+      const units = ['B', 'KB', 'MB', 'GB'];
+      let i = 0;
+      let size = bytes;
+      while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
+      return `${size.toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
+    }
+
+    function setCardFormat(idx, fmt) {
+      cardData[idx].format = fmt;
+      renderCard(idx);
+    }
+
+    function parseUrls(text) {
+      return [...new Set(text.split(/[\s,]+/).map(u => u.trim()).filter(u => u.startsWith('http')))];
+    }
+
+    function fmtDur(s) {
+      if (!s) return '';
+      const m = Math.floor(s / 60);
+      const sec = Math.floor(s % 60);
+      return `${m}:${sec.toString().padStart(2, '0')}`;
+    }
+
+    function esc(s) {
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    function friendlyError(err) {
+      if (err.includes('Unsupported URL')) return 'This URL is not supported';
+      if (err.includes('Video unavailable')) return 'Video is unavailable or private';
+      if (err.includes('Private video')) return 'This video is private';
+      if (err.includes('HTTP Error 403')) return 'Access denied. Please try again later.';
+      if (err.includes('HTTP Error 404')) return 'Video not found';
+      if (err.includes('Sign in to confirm')) return 'This video requires authentication.';
+      if (err.includes('cookies')) return 'Access denied. Please try again later.';
+      if (err.includes('copyright')) return 'Video blocked due to copyright';
+      if (err.includes('geo')) return 'Video not available in your region';
+      if (err.includes('timed out') || err.includes('Timed out')) return 'Request timed out — try again';
+      if (err.includes('network') || err.includes('Network')) return 'Network error — check your connection';
+      return err.length > 120 ? err.slice(0, 120) + '...' : err;
+    }
+
+    document.getElementById('urls').addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); go(); }
+    });
+
+    async function go() {
+      const urls = parseUrls(document.getElementById('urls').value);
+      if (!urls.length) return;
+
+      const btn = document.getElementById('goBtn');
+      const container = document.getElementById('cards');
+      btn.disabled = true;
+      btn.textContent = 'Loading...';
+      container.innerHTML = '';
+      cardData = [];
+
+      for (let i = 0; i < urls.length; i++) {
+        const url = urls[i];
+        const idx = cardData.length;
+        cardData.push({ url, status: 'loading' });
+        renderCard(idx);
+
+        try {
+          const res = await fetch('/api/info', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url }),
+          });
+          const data = await res.json();
+          if (data.error) {
+            cardData[idx] = { ...cardData[idx], status: 'info-error', error: data.error };
+          } else {
+            cardData[idx] = {
+              ...cardData[idx],
+              status: 'ready',
+              format: 'video',
+              title: data.title || '',
+              thumbnail: data.thumbnail || '',
+              duration: data.duration,
+              uploader: data.uploader || '',
+              formats: data.formats || [],
+              selectedFormatId: data.formats?.[0]?.id || null,
+              needs_cookies: data.needs_cookies || false,
+            };
+          }
+        } catch (err) {
+          cardData[idx] = { ...cardData[idx], status: 'info-error', error: err.message };
+        }
+        renderCard(idx);
+      }
+
+      if (cardData.filter(c => c.status === 'ready').length > 1) {
+        renderDownloadAll();
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Fetch';
+    }
+
+    function renderCard(idx) {
+      const c = cardData[idx];
+      let el = document.getElementById(`card-${idx}`);
+      if (!el) {
+        el = document.createElement('div');
+        el.id = `card-${idx}`;
+        el.className = 'card';
+        document.getElementById('cards').appendChild(el);
+      }
+
+      // Loading skeleton
+      if (c.status === 'loading') {
+        el.className = 'card';
+        el.innerHTML = `
+          <div class="card-thumb loading"></div>
+          <div class="card-body">
+            <div class="skeleton-line medium"></div>
+            <div class="skeleton-line short"></div>
+          </div>
+        `;
+        return;
+      }
+
+      // Error state
+      if (c.status === 'info-error') {
+        el.className = 'card card-error';
+        el.innerHTML = `
+          <div class="card-thumb">
+            <div class="card-error-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="card-title" style="color:var(--error)">Could not fetch video</div>
+            <div class="card-error-msg">${esc(friendlyError(c.error || ''))}</div>
+            <div class="card-error-url">${esc(c.url)}</div>
+          </div>
+        `;
+        return;
+      }
+
+      // Ready / downloading / done / error states
+      el.className = 'card';
+      const cardFmt = c.format || 'video';
+      const isAudio = cardFmt === 'audio';
+      const isImage = cardFmt === 'image';
+
+      let thumbHtml;
+      if (isAudio) {
+        thumbHtml = `<div class="no-thumb" style="color:var(--accent)"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>`;
+      } else if (isImage) {
+        thumbHtml = c.thumbnail ? `<img src="${c.thumbnail}" alt="">` : `<div class="no-thumb" style="color:var(--accent)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></div>`;
+      } else if (c.thumbnail) {
+        thumbHtml = `<img src="${c.thumbnail}" alt="">`;
+      } else {
+        thumbHtml = `<div class="no-thumb"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2"/><circle cx="8" cy="8" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></div>`;
+      }
+
+      // Format pills
+      const fmtPills = `<div class="fmt-pills">
+        <button class="fmt-pill${cardFmt === 'video' ? ' active' : ''}" onclick="setCardFormat(${idx}, 'video')">MP4</button>
+        <button class="fmt-pill${cardFmt === 'audio' ? ' active' : ''}" onclick="setCardFormat(${idx}, 'audio')">MP3</button>
+        <button class="fmt-pill${cardFmt === 'image' ? ' active' : ''}" onclick="setCardFormat(${idx}, 'image')">JPG</button>
+      </div>`;
+
+      // Quality chips (only for video)
+      let qualityChips = '';
+      if (!isAudio && !isImage && c.formats && c.formats.length > 0) {
+        qualityChips = c.formats.map(f =>
+          `<button class="q-chip${f.id === c.selectedFormatId ? ' active' : ''}" onclick="pickFormat(${idx}, '${f.id}')">${f.label}</button>`
+        ).join('');
+      }
+
+      let actionHtml = '';
+      let progressHtml = '';
+
+      if (c.status === 'ready') {
+        actionHtml = `${fmtPills}
+          ${!isAudio && !isImage && qualityChips ? '<div class="quality-row">' + qualityChips + '</div>' : ''}
+          <button class="card-dl-btn" onclick="dlCard(${idx})">Download</button>`;
+      } else if (c.status === 'downloading' || c.status === 'paused') {
+        const p = c.progress || {};
+        const pct = p.percent != null ? p.percent.toFixed(1) : '0';
+        const speed = p.speed || '--';
+        const eta = p.eta || '--';
+        const downloaded = fmtSize(p.downloaded || 0);
+        const total = p.total ? fmtSize(p.total) : '';
+        const isPaused = c.status === 'paused';
+        const statusIcon = isPaused ? '⏸' : '<span class="spin"></span>';
+        const statusText = isPaused ? 'Paused' : (total ? downloaded + ' / ' + total : 'Downloading...');
+        progressHtml = `
+          <div class="dl-progress">
+            <div class="progress-bar-bg"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
+            <div class="progress-info"><span>${pct}%</span><span>${speed} &middot; ETA ${eta}</span></div>
+          </div>
+          <div class="dl-controls">
+            <span class="card-status downloading">${statusIcon} ${statusText}</span>
+            <button class="card-dl-btn small" onclick="togglePause(${idx})">${isPaused ? 'Resume' : 'Pause'}</button>
+            <button class="card-dl-btn small cancel" onclick="cancelDl(${idx})">Cancel</button>
+          </div>`;
+      } else if (c.status === 'done') {
+        actionHtml = `<span class="card-status done">${esc(c.filename || '')}</span>
+          ${fmtPills}
+          ${!isAudio && !isImage && qualityChips ? '<div class="quality-row">' + qualityChips + '</div>' : ''}
+          <div class="done-btns">
+            <button class="card-dl-btn done" onclick="saveCard(${idx})">Save</button>
+            <button class="card-dl-btn" onclick="dlCard(${idx})">Re-download</button>
+          </div>`;
+      } else if (c.status === 'error') {
+        actionHtml = `<button class="card-dl-btn" onclick="dlCard(${idx})">Retry</button>
+          <span class="card-status error">${esc(friendlyError(c.error || 'Download failed'))}</span>`;
+      } else if (c.status === 'cancelled') {
+        actionHtml = `<span class="card-status error">Cancelled</span>
+          <button class="card-dl-btn" onclick="dlCard(${idx})">Download</button>`;
+      }
+
+      el.innerHTML = `
+        <div class="card-thumb">${thumbHtml}</div>
+        <div class="card-body">
+          <div class="card-title">${esc(c.title || 'Untitled')}</div>
+          <div class="card-meta">${esc(c.uploader)}${c.duration ? ' · ' + fmtDur(c.duration) : ''}</div>
+          <div class="card-actions">${actionHtml}</div>
+          ${progressHtml}
+        </div>
+      `;
+    }
+
+
+    async function togglePause(idx) {
+      const c = cardData[idx];
+      if (!c.jobId) return;
+      try {
+        const res = await fetch(`/api/pause/${c.jobId}`, { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'paused') {
+          c.status = 'paused';
+        } else if (data.status === 'resumed') {
+          c.status = 'downloading';
+        }
+        renderCard(idx);
+      } catch {}
+    }
+
+    async function cancelDl(idx) {
+      const c = cardData[idx];
+      if (!c.jobId) return;
+      try {
+        await fetch(`/api/cancel/${c.jobId}`, { method: 'POST' });
+        c.status = 'cancelled';
+        c.progress = {};
+        renderCard(idx);
+      } catch {}
+    }
+
+    function renderDownloadAll() {
+      const existing = document.getElementById('dl-all-bar');
+      if (existing) existing.remove();
+
+      const bar = document.createElement('div');
+      bar.id = 'dl-all-bar';
+      bar.className = 'dl-all-bar';
+      bar.innerHTML = `<button class="dl-all-btn" onclick="dlAll()">Download All</button>`;
+      document.getElementById('cards').appendChild(bar);
+    }
+
+    function pickFormat(idx, formatId) {
+      cardData[idx].selectedFormatId = formatId;
+      renderCard(idx);
+    }
+
+    async function dlCard(idx) {
+      const c = cardData[idx];
+      c.status = 'downloading';
+      c.error = null;
+      c.progress = {};
+      renderCard(idx);
+
+      try {
+        const res = await fetch('/api/download', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url: c.url,
+            format: c.format || 'video',
+            format_id: c.selectedFormatId,
+            title: c.title || '',
+            needs_cookies: c.needs_cookies || false,
+          }),
+        });
+        const data = await res.json();
+        if (data.error) {
+          c.status = 'error';
+          c.error = data.error;
+          renderCard(idx);
+          return;
+        }
+        c.jobId = data.job_id;
+        pollCard(idx);
+      } catch (err) {
+        c.status = 'error';
+        c.error = err.message;
+        renderCard(idx);
+      }
+    }
+
+    function pollCard(idx) {
+      const c = cardData[idx];
+      c._pollInterval = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/status/${c.jobId}`);
+          const data = await res.json();
+          if (data.progress) {
+            c.progress = data.progress;
+          }
+          if (data.status === 'done') {
+            clearInterval(c._pollInterval);
+            c.status = 'done';
+            c.filename = data.filename;
+            renderCard(idx);
+          } else if (data.status === 'error') {
+            clearInterval(c._pollInterval);
+            c.status = 'error';
+            c.error = data.error;
+            renderCard(idx);
+          } else if (data.status === 'cancelled') {
+            clearInterval(c._pollInterval);
+            c.status = 'cancelled';
+            renderCard(idx);
+          } else if (data.status === 'paused') {
+            // Keep polling but don't change status (user controls it)
+            c.progress = data.progress;
+            renderCard(idx);
+          } else {
+            c.status = 'downloading';
+            renderCard(idx);
+          }
+        } catch {
+          clearInterval(c._pollInterval);
+          c.status = 'error';
+          c.error = 'Lost connection to server';
+          renderCard(idx);
+        }
+      }, 1000);
+    }
+
+    function saveCard(idx) {
+      const c = cardData[idx];
+      if (!c.jobId) return;
+      const a = document.createElement('a');
+      a.href = `/api/file/${c.jobId}`;
+      a.download = c.filename || '';
+      a.click();
+    }
+
+    async function dlAll() {
+      const btn = document.querySelector('.dl-all-btn');
+      if (btn) { btn.disabled = true; btn.textContent = 'Downloading...'; }
+
+      for (let i = 0; i < cardData.length; i++) {
+        if (cardData[i].status === 'ready') {
+          await dlCard(i);
+        }
+      }
+
+      if (btn) { btn.disabled = false; btn.textContent = 'Download All'; }
+    }
+  </script>
+</body>
+</html>

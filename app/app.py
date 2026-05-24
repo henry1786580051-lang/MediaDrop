@@ -1,0 +1,405 @@
+import os
+import re
+import glob
+import json
+import subprocess
+import threading
+import signal
+import sys
+import atexit
+
+from flask import Flask, request, jsonify, send_file, render_template
+import errno
+
+app = Flask(__name__)
+
+
+@app.errorhandler(BrokenPipeError)
+@app.errorhandler(ConnectionResetError)
+def handle_broken_pipe(e):
+    """Handle broken pipe errors gracefully."""
+    print(f"[error] Broken pipe: {e}", file=sys.stderr, flush=True)
+    return jsonify({"error": "Connection lost. Please try again."}), 400
+
+CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
+jobs = {}
+
+
+def cleanup_all_jobs():
+    """Kill all running yt-dlp processes on exit."""
+    for job_id, job in list(jobs.items()):
+        proc = job.get("proc")
+        if proc and proc.poll() is None:
+            try:
+                proc.kill()
+                proc.wait(timeout=3)
+            except Exception:
+                pass
+    print("[cleanup] All subprocesses killed", file=sys.stderr, flush=True)
+
+
+atexit.register(cleanup_all_jobs)
+
+
+def cleanup_old_jobs():
+    """Remove completed/errored jobs older than 100 entries."""
+    if len(jobs) > 100:
+        done_keys = [k for k, v in jobs.items() if v.get("status") in ("done", "error", "cancelled")]
+        for k in done_keys[:len(done_keys) - 50]:
+            del jobs[k]
+
+
+def load_config():
+    default_dir = os.path.join(os.path.dirname(__file__), "downloads")
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE) as f:
+                cfg = json.load(f)
+            return cfg.get("download_dir", default_dir)
+        except Exception:
+            pass
+    return default_dir
+
+
+def save_config(download_dir):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump({"download_dir": download_dir}, f)
+
+
+def get_download_dir():
+    d = load_config()
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def parse_progress(line):
+    m = re.search(r"(\d+\.?\d*)%\s+of\s+~?\s*([\d.]+\w+i?B)\s+at\s+([\d.]+\w+/s|Unknown\s*\w*/s?)\s+ETA\s+([\d:]+|Unknown)", line)
+    if not m:
+        return None
+    pct = float(m.group(1))
+    size_str = m.group(2)
+    speed_str = m.group(3) if m.group(3) != "Unknown" else None
+    eta_str = m.group(4) if m.group(4) != "Unknown" else None
+    return {"percent": pct, "speed": speed_str, "eta": eta_str}
+
+
+def parse_size(s):
+    if not s:
+        return 0
+    s = s.strip().upper().replace("IB", "B")
+    units = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3}
+    m = re.match(r"([\d.]+)\s*(\w+)", s)
+    if not m:
+        return 0
+    val, unit = float(m.group(1)), m.group(2)
+    return int(val * units.get(unit, 1))
+
+
+def sanitize_filename(title, ext):
+    if not title:
+        return None
+    safe = re.sub(r'[\\/:*?"<>|]', "", title).strip()[:80].strip()
+    return f"{safe}{ext}" if safe else None
+
+
+def is_valid_url(url):
+    """Basic URL validation."""
+    return bool(re.match(r'^https?://', url))
+
+
+def get_ytdlp_env():
+    """Get clean environment for yt-dlp (remove PYTHONPATH to avoid interference)."""
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    return env
+
+
+def run_download(job_id, url, format_choice, format_id, title):
+    job = jobs[job_id]
+    download_dir = get_download_dir()
+    out_template = os.path.join(download_dir, f"{job_id}.%(ext)s")
+
+    cmd = ["yt-dlp", "--no-playlist", "--newline", "--progress", "-c", "-o", out_template]
+
+    if format_choice == "image":
+        ext = ".jpg"
+        cmd += ["--write-thumbnail", "--convert-thumbnails", "jpg", "--skip-download"]
+    elif format_choice == "audio":
+        ext = ".mp3"
+        cmd += ["-x", "--audio-format", "mp3"]
+    elif format_id:
+        ext = ".mp4"
+        cmd += ["-f", f"{format_id}+bestaudio/best", "--merge-output-format", "mp4"]
+    else:
+        ext = ".mp4"
+        cmd += ["-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4"]
+
+    cmd.append(url)
+
+    try:
+        print(f"[download] Starting download (format={format_choice})", file=sys.stderr, flush=True)
+        last_lines = []
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=get_ytdlp_env())
+        job["proc"] = proc
+        job["paused"] = False
+
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            last_lines.append(line)
+            if len(last_lines) > 10:
+                last_lines.pop(0)
+            prog = parse_progress(line)
+            if prog:
+                size_m = re.search(r"of\s+~?([\d.]+\w+i?B)", line)
+                total = parse_size(size_m.group(1)) if size_m else 0
+                pct = prog["percent"]
+                job["progress"] = {
+                    "percent": pct,
+                    "speed": prog["speed"],
+                    "eta": prog["eta"],
+                    "downloaded": int(total * pct / 100) if total else 0,
+                    "total": total,
+                }
+                job["status"] = "downloading"
+
+        proc.wait()
+
+        if proc.returncode != 0:
+            job["status"] = "error"
+            err_lines = [l for l in last_lines if "ERROR" in l or "error" in l.lower()]
+            job["error"] = err_lines[-1] if err_lines else "\n".join(last_lines[-3:])
+            print(f"[download] Failed (code {proc.returncode}): {job['error']}", file=sys.stderr, flush=True)
+            return
+
+        pattern = os.path.join(download_dir, f"{job_id}.*")
+        files = glob.glob(pattern)
+        if not files:
+            job["status"] = "error"
+            job["error"] = "Download completed but no file was found"
+            return
+
+        if format_choice == "audio":
+            chosen = next((f for f in files if f.endswith(".mp3")), files[0])
+        elif format_choice == "image":
+            chosen = next((f for f in files if f.endswith(".jpg")), files[0])
+        else:
+            chosen = next((f for f in files if f.endswith(".mp4")), files[0])
+
+        for f in files:
+            if f != chosen:
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+
+        friendly_name = sanitize_filename(title, ext) or os.path.basename(chosen)
+
+        job["status"] = "done"
+        job["file"] = chosen
+        job["filename"] = friendly_name
+        job["progress"]["percent"] = 100.0
+        job["progress"]["eta"] = None
+
+    except Exception as e:
+        job["status"] = "error"
+        job["error"] = str(e)
+
+
+@app.route("/")
+def index():
+    resp = render_template("index.html")
+    # Prevent browser/Electron from caching the template
+    from flask import make_response
+    response = make_response(resp)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
+
+
+@app.route("/api/info", methods=["POST"])
+def get_info():
+    data = request.json
+    url = data.get("url", "").strip()
+    if not url:
+        return jsonify({"error": "No URL provided"}), 400
+    if not is_valid_url(url):
+        return jsonify({"error": "Invalid URL"}), 400
+
+    try:
+        cmd = ["yt-dlp", "--no-playlist", "-j", url]
+        print("[info] Fetching video info", file=sys.stderr, flush=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=get_ytdlp_env())
+
+        if result.returncode != 0:
+            err_detail = result.stderr.strip()
+            print(f"[info] yt-dlp failed: {err_detail[:200]}", file=sys.stderr, flush=True)
+            return jsonify({"error": err_detail.split("\n")[-1]}), 400
+
+        info = json.loads(result.stdout)
+        needs_cookies = False
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Timed out fetching video info"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+    best_by_height = {}
+    for f in info.get("formats", []):
+        height = f.get("height")
+        vcodec = f.get("vcodec") or ""
+        if height and vcodec and vcodec != "none":
+            proto = f.get("protocol", "")
+            tbr = f.get("tbr") or 0
+            existing = best_by_height.get(height)
+            # Prefer https (DASH) over m3u8 (HLS) - DASH is much faster
+            if not existing:
+                best_by_height[height] = f
+            elif proto == "https" and existing.get("protocol", "") != "https":
+                best_by_height[height] = f
+            elif proto == existing.get("protocol", "") and tbr > (existing.get("tbr") or 0):
+                best_by_height[height] = f
+
+    formats = [{"id": f["format_id"], "label": f"{h}p", "height": h} for h, f in best_by_height.items()]
+    formats.sort(key=lambda x: x["height"], reverse=True)
+
+    return jsonify({
+        "title": info.get("title", ""),
+        "thumbnail": info.get("thumbnail", ""),
+        "duration": info.get("duration"),
+        "uploader": info.get("uploader", ""),
+        "formats": formats,
+        "needs_cookies": needs_cookies,
+    })
+
+
+@app.route("/api/download", methods=["POST"])
+def start_download():
+    data = request.json
+    url = data.get("url", "").strip()
+    format_choice = data.get("format", "video")
+    format_id = data.get("format_id")
+    title = data.get("title", "")
+    needs_cookies = data.get("needs_cookies", False)
+
+    if not url:
+        return jsonify({"error": "No URL provided"}), 400
+    if not is_valid_url(url):
+        return jsonify({"error": "Invalid URL"}), 400
+
+    import time
+    cleanup_old_jobs()
+    url_hash = re.sub(r"[^a-zA-Z0-9]", "_", url)[-40:]
+    job_id = f"{url_hash}_{int(time.time()*1000)}"
+    jobs[job_id] = {
+        "status": "starting",
+        "url": url,
+        "title": title,
+        "progress": {"percent": None, "speed": None, "eta": None, "downloaded": 0, "total": 0},
+    }
+
+    thread = threading.Thread(target=run_download, args=(job_id, url, format_choice, format_id, title))
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/status/<job_id>")
+def check_status(job_id):
+    job = jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    resp = {
+        "status": job["status"],
+        "error": job.get("error"),
+        "filename": job.get("filename"),
+        "progress": job.get("progress", {}),
+    }
+    return jsonify(resp)
+
+
+@app.route("/api/file/<job_id>")
+def download_file(job_id):
+    job = jobs.get(job_id)
+    if not job or job["status"] != "done":
+        return jsonify({"error": "File not ready"}), 404
+    file_path = job["file"]
+    # Prevent path traversal
+    real_path = os.path.realpath(file_path)
+    download_dir = os.path.realpath(get_download_dir())
+    if not real_path.startswith(download_dir):
+        return jsonify({"error": "Access denied"}), 403
+    return send_file(real_path, as_attachment=True, download_name=job.get("filename"))
+
+
+@app.route("/api/pause/<job_id>", methods=["POST"])
+def pause_download(job_id):
+    job = jobs.get(job_id)
+    if not job or not job.get("proc"):
+        return jsonify({"error": "Job not found"}), 404
+    proc = job["proc"]
+    if proc.poll() is not None:
+        return jsonify({"error": "Process already finished"}), 400
+    import signal
+    try:
+        if job.get("paused"):
+            proc.send_signal(signal.SIGCONT)
+            job["paused"] = False
+            job["status"] = "downloading"
+            return jsonify({"status": "resumed"})
+        else:
+            proc.send_signal(signal.SIGSTOP)
+            job["paused"] = True
+            job["status"] = "paused"
+            return jsonify({"status": "paused"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/cancel/<job_id>", methods=["POST"])
+def cancel_download(job_id):
+    job = jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    proc = job.get("proc")
+    if proc and proc.poll() is None:
+        proc.kill()
+    job["status"] = "cancelled"
+    return jsonify({"status": "cancelled"})
+
+
+@app.route("/api/config", methods=["GET", "POST"])
+def config():
+    if request.method == "POST":
+        data = request.json
+        new_dir = data.get("download_dir", "").strip()
+        if not new_dir:
+            return jsonify({"error": "No path provided"}), 400
+        new_dir = os.path.expanduser(new_dir)
+        try:
+            os.makedirs(new_dir, exist_ok=True)
+        except OSError as e:
+            return jsonify({"error": f"Cannot create directory: {e}"}), 400
+        save_config(new_dir)
+        return jsonify({"download_dir": new_dir})
+    return jsonify({"download_dir": get_download_dir()})
+
+
+def signal_handler(sig, frame):
+    """Handle termination signals."""
+    print(f"[signal] Received signal {sig}, cleaning up...", file=sys.stderr, flush=True)
+    cleanup_all_jobs()
+    sys.exit(0)
+
+
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8899))
+    host = os.environ.get("HOST", "127.0.0.1")
+    print(f"[startup] MediaDrop starting on {host}:{port}", file=sys.stderr, flush=True)
+    app.run(host=host, port=port)
