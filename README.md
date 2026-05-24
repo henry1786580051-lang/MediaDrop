@@ -11,7 +11,7 @@
 > **👉 [下载桌面应用](https://github.com/henry1786580051-lang/MediaDrop/releases/tag/V1.0.0)**，macOS 一键安装，开箱即用。
 
 <p align="center">
-  <img src="app/assets/preview-mp3.png" alt="MediaDrop MP3 模式" width="80%" />
+  <img src="app/assets/preview.png" alt="MediaDrop 界面预览" width="80%" />
 </p>
 
 ---
