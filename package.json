@@ -1,0 +1,60 @@
+{
+  "name": "mediadrop",
+  "version": "1.0.0",
+  "description": "Self-hosted video and audio downloader",
+  "author": "MediaDrop",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac"
+  },
+  "build": {
+    "appId": "com.mediadrop.desktop",
+    "productName": "MediaDrop",
+    "mac": {
+      "category": "public.app-category.utilities",
+      "target": [
+        "dmg"
+      ],
+      "icon": "icon.png"
+    },
+    "dmg": {
+      "title": "MediaDrop",
+      "contents": [
+        { "x": 130, "y": 220 },
+        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+      ]
+    },
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "app/**/*",
+      "assets/**/*",
+      "!venv",
+      "!downloads",
+      "!*.pyc",
+      "!__pycache__"
+    ],
+    "extraResources": [
+      {
+        "from": "../reclip/",
+        "to": "app",
+        "filter": [
+          "**/*",
+          "!venv/**",
+          "!downloads/**",
+          "!.git/**",
+          "!__pycache__/**"
+        ]
+      }
+    ]
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  }
+}
