@@ -18,10 +18,10 @@ jobs:
           - os: macos-latest
             platform: mac
             arch: arm64
-          - os: ubuntu-latest
+          - os: windows-latest
             platform: win
             arch: x64
-          - os: ubuntu-latest
+          - os: windows-latest
             platform: win
             arch: arm64
 
