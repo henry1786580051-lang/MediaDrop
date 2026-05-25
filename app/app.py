@@ -7,6 +7,7 @@ import threading
 import signal
 import sys
 import atexit
+import socket
 
 from flask import Flask, request, jsonify, send_file, render_template
 
@@ -16,16 +17,19 @@ app = Flask(__name__)
 @app.errorhandler(BrokenPipeError)
 @app.errorhandler(ConnectionResetError)
 def handle_broken_pipe(e):
-    """Handle broken pipe errors gracefully."""
+    """Handle broken pipe — occurs when Electron window closes mid-transfer."""
     print(f"[error] Broken pipe: {e}", file=sys.stderr, flush=True)
     return jsonify({"error": "Connection lost. Please try again."}), 400
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
+
+# In-memory job tracker. Each entry: { status, proc, progress, file, filename, ... }
+# Not persisted — jobs are lost on restart, which is acceptable for a desktop app.
 jobs = {}
 
 
 def cleanup_all_jobs():
-    """Kill all running yt-dlp processes on exit."""
+    """Kill all running yt-dlp processes on app exit."""
     for job_id, job in list(jobs.items()):
         proc = job.get("proc")
         if proc and proc.poll() is None:
@@ -49,29 +53,84 @@ def cleanup_old_jobs():
 
 
 def load_config():
+    """Load config from disk, merging with defaults. Returns full dict."""
     default_dir = os.path.join(os.path.dirname(__file__), "downloads")
+    defaults = {"download_dir": default_dir, "proxy_url": ""}
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE) as f:
                 cfg = json.load(f)
-            return cfg.get("download_dir", default_dir)
+            # Merge with defaults so new keys are always present
+            return {**defaults, **cfg}
         except Exception:
             pass
-    return default_dir
+    return defaults
 
 
-def save_config(download_dir):
+def save_config(updates):
+    """Merge updates into existing config and write to disk."""
+    cfg = load_config()
+    cfg.update(updates)
     with open(CONFIG_FILE, "w") as f:
-        json.dump({"download_dir": download_dir}, f)
+        json.dump(cfg, f)
+
+
+def make_unique_filename(directory, base_name, ext):
+    """Generate a unique filename by appending (1), (2), etc. if base_name.ext exists."""
+    candidate = os.path.join(directory, f"{base_name}{ext}")
+    if not os.path.exists(candidate):
+        return candidate, f"{base_name}{ext}"
+    counter = 1
+    while True:
+        name = f"{base_name} ({counter}){ext}"
+        candidate = os.path.join(directory, name)
+        if not os.path.exists(candidate):
+            return candidate, name
+        counter += 1
+
+
+def is_proxy_reachable(proxy_url):
+    """Check if the proxy server is actually listening. Timeout 1s."""
+    try:
+        # Parse host:port from URL like "http://127.0.0.1:7897"
+        match = re.match(r"https?://([^:/]+):(\d+)", proxy_url)
+        if not match:
+            return False
+        host, port = match.group(1), int(match.group(2))
+        with socket.create_connection((host, port), timeout=1):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+def get_proxy_url():
+    """Get proxy URL from config, returning empty string if proxy is unreachable.
+
+    This prevents yt-dlp from failing when the user has shut down their proxy
+    software since the last time MediaDrop was configured.
+    """
+    cfg = load_config()
+    proxy = cfg.get("proxy_url", "") or ""
+    if proxy and not is_proxy_reachable(proxy):
+        print(f"[proxy] Configured proxy {proxy} is unreachable, using direct connection",
+              file=sys.stderr, flush=True)
+        return ""
+    return proxy
 
 
 def get_download_dir():
-    d = load_config()
+    cfg = load_config()
+    d = cfg["download_dir"]
     os.makedirs(d, exist_ok=True)
     return d
 
 
 def parse_progress(line):
+    """Extract download progress from a yt-dlp output line.
+
+    Expected format: " 45.2% of ~123.45MiB at 1.23MiB/s ETA 01:23"
+    Returns dict with percent, speed, eta or None if line doesn't match.
+    """
     m = re.search(r"(\d+\.?\d*)%\s+of\s+~?\s*([\d.]+\w+i?B)\s+at\s+([\d.]+\w+/s|Unknown\s*\w*/s?)\s+ETA\s+([\d:]+|Unknown)", line)
     if not m:
         return None
@@ -82,6 +141,7 @@ def parse_progress(line):
 
 
 def parse_size(s):
+    """Parse human-readable size string ('123.45MiB') to byte count."""
     if not s:
         return 0
     s = s.strip().upper().replace("IB", "B")
@@ -94,6 +154,7 @@ def parse_size(s):
 
 
 def sanitize_filename(title, ext):
+    """Generate a filesystem-safe filename from video title, capped at 80 chars."""
     if not title:
         return None
     safe = re.sub(r'[\\/:*?"<>|]', "", title).strip()[:80].strip()
@@ -106,9 +167,17 @@ def is_valid_url(url):
 
 
 def get_ytdlp_env():
-    """Get clean environment for yt-dlp (remove PYTHONPATH to avoid interference)."""
+    """Build environment for yt-dlp subprocesses.
+
+    Removes PYTHONPATH to avoid interference from Electron's bundled Python paths.
+    Sets proxy env vars so yt-dlp can reach video sites through the configured proxy.
+    """
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
+    proxy = get_proxy_url()
+    if proxy:
+        env["http_proxy"] = proxy
+        env["https_proxy"] = proxy
     return env
 
 
@@ -119,6 +188,13 @@ def run_download(job_id, url, format_choice, format_id, title):
 
     cmd = ["yt-dlp", "--no-playlist", "--newline", "--progress", "-c", "-o", out_template]
 
+    # Pass --proxy flag directly to yt-dlp in addition to env vars,
+    # because some yt-dlp extractors ignore env vars and only respect --proxy.
+    proxy = get_proxy_url()
+    if proxy:
+        cmd += ["--proxy", proxy]
+
+    # Build format-specific yt-dlp flags
     if format_choice == "image":
         ext = ".jpg"
         cmd += ["--write-thumbnail", "--convert-thumbnails", "jpg", "--skip-download"]
@@ -126,9 +202,11 @@ def run_download(job_id, url, format_choice, format_id, title):
         ext = ".mp3"
         cmd += ["-x", "--audio-format", "mp3"]
     elif format_id:
+        # User selected a specific quality — merge video+audio streams
         ext = ".mp4"
         cmd += ["-f", f"{format_id}+bestaudio/best", "--merge-output-format", "mp4"]
     else:
+        # Default: best available quality
         ext = ".mp4"
         cmd += ["-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4"]
 
@@ -171,6 +249,7 @@ def run_download(job_id, url, format_choice, format_id, title):
             print(f"[download] Failed (code {proc.returncode}): {job['error']}", file=sys.stderr, flush=True)
             return
 
+        # Find downloaded file(s) — yt-dlp may produce extra files (.part, .ytdl, etc.)
         pattern = os.path.join(download_dir, f"{job_id}.*")
         files = glob.glob(pattern)
         if not files:
@@ -178,6 +257,7 @@ def run_download(job_id, url, format_choice, format_id, title):
             job["error"] = "Download completed but no file was found"
             return
 
+        # Pick the actual output file by extension
         if format_choice == "audio":
             chosen = next((f for f in files if f.endswith(".mp3")), files[0])
         elif format_choice == "image":
@@ -185,6 +265,7 @@ def run_download(job_id, url, format_choice, format_id, title):
         else:
             chosen = next((f for f in files if f.endswith(".mp4")), files[0])
 
+        # Clean up any extra files (thumbnails, temp files, etc.)
         for f in files:
             if f != chosen:
                 try:
@@ -192,7 +273,15 @@ def run_download(job_id, url, format_choice, format_id, title):
                 except OSError:
                     pass
 
-        friendly_name = sanitize_filename(title, ext) or os.path.basename(chosen)
+        # Rename from job_id to human-readable title with counter for duplicates
+        base_name = sanitize_filename(title, "") or job_id
+        new_path, friendly_name = make_unique_filename(download_dir, base_name, ext)
+        try:
+            os.rename(chosen, new_path)
+            chosen = new_path
+        except OSError:
+            # If rename fails, keep the job_id filename
+            friendly_name = os.path.basename(chosen)
 
         job["status"] = "done"
         job["file"] = chosen
@@ -228,6 +317,9 @@ def get_info():
 
     try:
         cmd = ["yt-dlp", "--no-playlist", "-j", url]
+        proxy = get_proxy_url()
+        if proxy:
+            cmd += ["--proxy", proxy]
         print("[info] Fetching video info", file=sys.stderr, flush=True)
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=get_ytdlp_env())
 
@@ -242,6 +334,9 @@ def get_info():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
+    # Deduplicate formats by resolution — keep only the best stream per height.
+    # DASH (https) is preferred over HLS (m3u8) because it allows range requests
+    # and is significantly faster for seeking/resuming downloads.
     best_by_height = {}
     for f in info.get("formats", []):
         height = f.get("height")
@@ -250,7 +345,6 @@ def get_info():
             proto = f.get("protocol", "")
             tbr = f.get("tbr") or 0
             existing = best_by_height.get(height)
-            # Prefer https (DASH) over m3u8 (HLS) - DASH is much faster
             if not existing:
                 best_by_height[height] = f
             elif proto == "https" and existing.get("protocol", "") != "https":
@@ -285,6 +379,7 @@ def start_download():
 
     import time
     cleanup_old_jobs()
+    # Generate a readable-enough job ID from URL hash + timestamp
     url_hash = re.sub(r"[^a-zA-Z0-9]", "_", url)[-40:]
     job_id = f"{url_hash}_{int(time.time()*1000)}"
     jobs[job_id] = {
@@ -321,7 +416,7 @@ def download_file(job_id):
     if not job or job["status"] != "done":
         return jsonify({"error": "File not ready"}), 404
     file_path = job["file"]
-    # Prevent path traversal
+    # Path traversal guard: ensure resolved path stays within download directory
     real_path = os.path.realpath(file_path)
     download_dir = os.path.realpath(get_download_dir())
     if not real_path.startswith(download_dir):
@@ -368,17 +463,28 @@ def cancel_download(job_id):
 def config():
     if request.method == "POST":
         data = request.json
+        updates = {}
+
         new_dir = data.get("download_dir", "").strip()
-        if not new_dir:
-            return jsonify({"error": "No path provided"}), 400
-        new_dir = os.path.expanduser(new_dir)
-        try:
-            os.makedirs(new_dir, exist_ok=True)
-        except OSError as e:
-            return jsonify({"error": f"Cannot create directory: {e}"}), 400
-        save_config(new_dir)
-        return jsonify({"download_dir": new_dir})
-    return jsonify({"download_dir": get_download_dir()})
+        if new_dir:
+            new_dir = os.path.expanduser(new_dir)
+            try:
+                os.makedirs(new_dir, exist_ok=True)
+            except OSError as e:
+                return jsonify({"error": f"Cannot create directory: {e}"}), 400
+            updates["download_dir"] = new_dir
+
+        if "proxy_url" in data:
+            updates["proxy_url"] = data["proxy_url"].strip()
+
+        if updates:
+            save_config(updates)
+
+        cfg = load_config()
+        return jsonify({"download_dir": cfg["download_dir"], "proxy_url": cfg["proxy_url"]})
+
+    cfg = load_config()
+    return jsonify({"download_dir": cfg["download_dir"], "proxy_url": cfg["proxy_url"]})
 
 
 def signal_handler(sig, frame):
@@ -393,6 +499,15 @@ signal.signal(signal.SIGINT, signal_handler)
 
 
 if __name__ == "__main__":
+    # First-run: import proxy from Electron's detectProxy() if config is empty.
+    # This way users don't need to manually configure their proxy on first launch.
+    env_proxy = os.environ.get("PROXY_URL", "")
+    if env_proxy:
+        cfg = load_config()
+        if not cfg.get("proxy_url"):
+            save_config({"proxy_url": env_proxy})
+            print(f"[startup] Saved proxy from environment: {env_proxy}", file=sys.stderr, flush=True)
+
     port = int(os.environ.get("PORT", 8899))
     host = os.environ.get("HOST", "127.0.0.1")
     print(f"[startup] MediaDrop starting on {host}:{port}", file=sys.stderr, flush=True)

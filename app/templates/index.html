@@ -546,6 +546,11 @@
           <button class="browse-btn" onclick="browsePath()">Browse</button>
           <button onclick="savePath()">Apply</button>
         </div>
+        <div class="settings-row" style="margin-top:8px">
+          <input id="proxyUrl" type="text" placeholder="Proxy URL (e.g. http://127.0.0.1:7897)">
+          <button class="browse-btn" onclick="autoDetectProxy()">Detect</button>
+          <button onclick="saveProxy()">Apply</button>
+        </div>
         <div class="settings-msg" id="settingsMsg"></div>
       </div>
     </div>
@@ -582,6 +587,7 @@
         const res = await fetch('/api/config');
         const data = await res.json();
         document.getElementById('dlPath').value = data.download_dir || '';
+        document.getElementById('proxyUrl').value = data.proxy_url || '';
       } catch {}
     }
 
@@ -607,6 +613,51 @@
       } catch (err) {
         msg.className = 'settings-msg err';
         msg.textContent = err.message;
+      }
+    }
+
+    async function saveProxy() {
+      const input = document.getElementById('proxyUrl');
+      const msg = document.getElementById('settingsMsg');
+      try {
+        const res = await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ proxy_url: input.value }),
+        });
+        const data = await res.json();
+        if (data.error) {
+          msg.className = 'settings-msg err';
+          msg.textContent = data.error;
+        } else {
+          msg.className = 'settings-msg ok';
+          msg.textContent = 'Proxy updated';
+          input.value = data.proxy_url || '';
+          setTimeout(() => { msg.textContent = ''; }, 2000);
+        }
+      } catch (err) {
+        msg.className = 'settings-msg err';
+        msg.textContent = err.message;
+      }
+    }
+
+    async function autoDetectProxy() {
+      const input = document.getElementById('proxyUrl');
+      const msg = document.getElementById('settingsMsg');
+      if (window.electronAPI && window.electronAPI.detectProxy) {
+        const proxy = await window.electronAPI.detectProxy();
+        if (proxy) {
+          input.value = proxy;
+          saveProxy();
+        } else {
+          msg.className = 'settings-msg err';
+          msg.textContent = 'No proxy detected';
+          setTimeout(() => { msg.textContent = ''; }, 2000);
+        }
+      } else {
+        msg.className = 'settings-msg err';
+        msg.textContent = 'Auto-detect requires desktop app';
+        setTimeout(() => { msg.textContent = ''; }, 2000);
       }
     }
 

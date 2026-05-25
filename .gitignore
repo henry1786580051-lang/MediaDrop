@@ -36,3 +36,7 @@ Thumbs.db
 # Assets (large files)
 assets/*.mov
 assets/*.mp4
+
+# Duplicate project directories
+mediadrop/
+reclip/

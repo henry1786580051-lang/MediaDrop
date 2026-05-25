@@ -7,27 +7,33 @@ const net = require("net");
 
 let mainWindow = null;
 let flaskProcess = null;
-const PORT = 8899;
+const DEFAULT_PORT = 8899;
+let PORT = DEFAULT_PORT; // Actual port used, may differ from DEFAULT_PORT if occupied
 
-// Ensure Homebrew and user Python paths are available when launched from DMG
+// --- PATH setup ---
+// When launched from a DMG, macOS resets PATH to a minimal set, losing Homebrew
+// and user-installed Python packages. We restore them here so that `yt-dlp`,
+// `ffmpeg`, and user Python scripts are discoverable by the Flask subprocess.
 const userSitePackages = path.join(os.homedir(), "Library/Python/3.9/lib/python/site-packages");
 const userBin = path.join(os.homedir(), "Library/Python/3.9/bin");
-// Remove old paths first, then prepend in correct order (homebrew first for latest yt-dlp)
 for (const p of ["/opt/homebrew/bin", userBin]) {
   process.env.PATH = process.env.PATH.split(":").filter(x => x !== p).join(":");
 }
-// Prepend in reverse order so homebrew ends up first
 process.env.PATH = `/opt/homebrew/bin:${userBin}:${process.env.PATH}`;
 if (!process.env.PYTHONPATH || !process.env.PYTHONPATH.includes(userSitePackages)) {
   process.env.PYTHONPATH = `${userSitePackages}:${process.env.PYTHONPATH || ""}`;
 }
 
-// Auto-detect proxy from system settings or shell profile
+// Detect system proxy via 3 methods (priority order). Returns proxy URL or null.
+// Also sets http_proxy/https_proxy env vars so child processes inherit them.
+// NOTE: Cannot detect TUN-mode proxies (e.g. Clash in enhanced mode) since they
+// operate at the network layer without exposing a system proxy setting.
 function detectProxy() {
-  // 1. Already set in environment
-  if (process.env.https_proxy || process.env.http_proxy) return;
+  // 1. Already set in environment — trust whatever the caller configured
+  if (process.env.https_proxy || process.env.http_proxy)
+    return process.env.https_proxy || process.env.http_proxy;
 
-  // 2. Try reading from macOS system proxy
+  // 2. macOS system proxy (System Settings → Wi-Fi → Proxies)
   try {
     const { execSync } = require("child_process");
     const output = execSync("networksetup -getwebproxy Wi-Fi", { encoding: "utf8", timeout: 3000 });
@@ -39,28 +45,45 @@ function detectProxy() {
       process.env.http_proxy = proxy;
       process.env.https_proxy = proxy;
       console.log(`[proxy] Using system proxy: ${proxy}`);
-      return;
+      return proxy;
     }
   } catch {}
 
-  // 3. Try reading from shell profile (safe: only allow known profile names)
+  // 3. Shell profile fallback — source .zshrc/.bashrc to read exported proxy vars
   try {
     const { execSync } = require("child_process");
     const shellPath = process.env.SHELL || "/bin/zsh";
     const profile = shellPath.includes("zsh") ? ".zshrc" : ".bashrc";
-    // Validate profile name to prevent injection
-    if (!/^\.(zshrc|bashrc)$/.test(profile)) return;
+    if (!/^\.(zshrc|bashrc)$/.test(profile)) return null;
     const content = execSync(`source ~/${profile} 2>/dev/null; echo "$http_proxy|$https_proxy"`, {
       encoding: "utf8", timeout: 3000, shell: "/bin/zsh"
     });
     const [http, https] = content.trim().split("|");
     if (http) process.env.http_proxy = http;
     if (https) process.env.https_proxy = https;
-    if (http || https) console.log(`[proxy] Using profile proxy: ${http || https}`);
+    const proxy = https || http;
+    if (proxy) console.log(`[proxy] Using profile proxy: ${proxy}`);
+    return proxy || null;
   } catch {}
+  return null;
 }
-detectProxy();
 
+// Try to bind startPort; if occupied, recursively try startPort+1, +2, etc.
+// Uses net.createServer() to test availability without actually starting a server.
+function findAvailablePort(startPort) {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.listen(startPort, "127.0.0.1", () => {
+      const port = server.address().port;
+      server.close(() => resolve(port));
+    });
+    server.on("error", () => {
+      findAvailablePort(startPort + 1).then(resolve).catch(reject);
+    });
+  });
+}
+
+// Resolve the app/ directory path — different locations in dev vs packaged DMG
 function getResourcePath() {
   if (app.isPackaged) {
     return path.join(process.resourcesPath, "app");
@@ -68,6 +91,7 @@ function getResourcePath() {
   return path.join(__dirname, "app");
 }
 
+// Prefer venv Python if it exists, otherwise fall back to system python3
 function getPythonPath() {
   const venvPython = path.join(getResourcePath(), "venv", "bin", "python3");
   if (fs.existsSync(venvPython)) {
@@ -76,6 +100,7 @@ function getPythonPath() {
   return "python3";
 }
 
+// Parallel check for required CLI tools. Returns names of missing ones.
 function checkDependencies() {
   return new Promise((resolve) => {
     const checks = [
@@ -103,8 +128,9 @@ function checkDependencies() {
   });
 }
 
+// Safety net: kill any process still holding our port on app exit.
+// Not used during startup — findAvailablePort handles port conflicts non-destructively.
 function killPortProcess(port) {
-  // Validate port is a number to prevent injection
   if (typeof port !== 'number' || port < 1 || port > 65535) return;
   try {
     const { execSync } = require("child_process");
@@ -121,6 +147,7 @@ function killPortProcess(port) {
   } catch {}
 }
 
+// Poll port with TCP connect every 300ms until Flask is ready or timeout.
 function waitForPort(port, timeout = 15000) {
   return new Promise((resolve, reject) => {
     const start = Date.now();
@@ -144,17 +171,20 @@ function waitForPort(port, timeout = 15000) {
   });
 }
 
-function startFlaskServer() {
-  killPortProcess(PORT);
+// Launch Flask as a child process. Passes PROXY_URL so Flask can persist it to
+// config.json on first run, avoiding the need for users to configure it twice.
+function startFlaskServer(proxyUrl) {
   const appPath = getResourcePath();
   const python = getPythonPath();
   const appPy = path.join(appPath, "app.py");
 
   return new Promise((resolve, reject) => {
     let stderrOutput = "";
+    const flaskEnv = { ...process.env, PORT: String(PORT), HOST: "127.0.0.1" };
+    if (proxyUrl) flaskEnv.PROXY_URL = proxyUrl;
     flaskProcess = spawn(python, [appPy], {
       cwd: appPath,
-      env: { ...process.env, PORT: String(PORT), HOST: "127.0.0.1" },
+      env: flaskEnv,
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -177,6 +207,7 @@ function startFlaskServer() {
   });
 }
 
+// Fetch download dir from Flask API (used by Electron's will-download handler)
 async function getDownloadDir() {
   try {
     const res = await fetch(`http://127.0.0.1:${PORT}/api/config`);
@@ -223,6 +254,8 @@ function createWindow() {
   });
 }
 
+// --- IPC handlers (called from renderer via preload.js) ---
+
 ipcMain.handle("select-folder", async () => {
   const result = await dialog.showOpenDialog(mainWindow || undefined, {
     properties: ["openDirectory", "createDirectory"],
@@ -230,6 +263,13 @@ ipcMain.handle("select-folder", async () => {
   if (result.canceled || !result.filePaths.length) return null;
   return result.filePaths[0];
 });
+
+ipcMain.handle("detect-proxy", () => {
+  const url = detectProxy();
+  return url || "";
+});
+
+// --- App lifecycle ---
 
 app.whenReady().then(async () => {
   const missing = await checkDependencies();
@@ -246,7 +286,12 @@ app.whenReady().then(async () => {
   }
 
   try {
-    await startFlaskServer();
+    const proxyUrl = detectProxy();
+    PORT = await findAvailablePort(DEFAULT_PORT);
+    if (PORT !== DEFAULT_PORT) {
+      console.log(`[port] ${DEFAULT_PORT} occupied, using ${PORT}`);
+    }
+    await startFlaskServer(proxyUrl);
     createWindow();
   } catch (err) {
     await dialog.showMessageBox({
@@ -259,6 +304,7 @@ app.whenReady().then(async () => {
   }
 });
 
+// Cleanup: kill Flask process group (includes all yt-dlp children) on window close
 app.on("window-all-closed", () => {
   if (flaskProcess) {
     // Kill Flask and all its child processes (yt-dlp)
@@ -274,6 +320,7 @@ app.on("window-all-closed", () => {
   app.quit();
 });
 
+// macOS dock click — reopen window if all were closed
 app.on("activate", () => {
   if (mainWindow === null) {
     createWindow();
