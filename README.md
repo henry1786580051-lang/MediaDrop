@@ -8,6 +8,8 @@
 
 一个简洁优雅的视频 / 音频下载器，支持 YouTube、TikTok、Instagram、Twitter/X 等 1000+ 网站，一键下载为 MP4、MP3 或 JPG。
 
+> 本项目基于 [reclip](https://github.com/averygan/reclip) 开发，在此致谢。
+
 > **👉 [下载桌面应用](https://github.com/henry1786580051-lang/MediaDrop/releases/latest)**，macOS / Windows 一键安装，开箱即用。
 
 <p align="center">
