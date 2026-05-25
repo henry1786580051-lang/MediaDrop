@@ -8,7 +8,7 @@
 
 一个简洁优雅的视频 / 音频下载器，支持 YouTube、TikTok、Instagram、Twitter/X 等 1000+ 网站，一键下载为 MP4、MP3 或 JPG。
 
-> **👉 [下载桌面应用](https://github.com/henry1786580051-lang/MediaDrop/releases/tag/V1.0.0)**，macOS / Windows 一键安装，开箱即用。
+> **👉 [下载桌面应用](https://github.com/henry1786580051-lang/MediaDrop/releases/latest)**，macOS / Windows 一键安装，开箱即用。
 
 <p align="center">
   <img src="app/assets/preview.png" alt="MediaDrop 界面预览" width="80%" />
@@ -58,17 +58,17 @@
 
 ### 方式一：下载桌面应用（推荐）
 
-前往 [Releases](https://github.com/henry1786580051-lang/MediaDrop/releases/tag/V1.0.0) 页面下载安装包：
+前往 [Releases](https://github.com/henry1786580051-lang/MediaDrop/releases/latest) 页面下载安装包：
 
-| 平台 | 架构 | 文件 | 大小 |
-|------|------|------|------|
-| **macOS** | Apple Silicon (M1+) | `MediaDrop.dmg` | ~95MB |
-| **Windows** | x64（绝大多数电脑） | `MediaDrop Setup 1.0.0.exe` | ~81MB |
-| **Windows** | ARM64（Surface 等） | `MediaDrop Setup 1.0.0 arm64.exe` | ~86MB |
+| 平台 | 架构 | 文件 |
+|------|------|------|
+| **macOS** | Apple Silicon (M1+) | `MediaDrop-*-arm64.dmg` |
+| **Windows** | x64（绝大多数电脑） | `MediaDrop.Setup.*.exe` |
+| **Windows** | ARM64（Surface 等） | `MediaDrop.Setup.*.arm64.exe` |
 
 > 💡 **不确定用哪个版本？**
-> - **Mac 用户**：下载 `MediaDrop.dmg`（仅支持 Apple Silicon / M1+）
-> - **Windows 用户**：下载 `MediaDrop Setup 1.0.0.exe`（x64，兼容绝大多数 Windows 电脑）
+> - **Mac 用户**：下载 `.dmg` 文件（仅支持 Apple Silicon / M1+）
+> - **Windows 用户**：下载不带 `arm64` 的 `.exe`（x64，兼容绝大多数 Windows 电脑）
 
 <details>
 <summary><strong>🍎 macOS 安装说明</strong></summary>
