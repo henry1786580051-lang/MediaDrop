@@ -18,7 +18,10 @@
       "target": [
         "dmg"
       ],
-      "icon": "icon.png"
+      "icon": "icon.png",
+      "hardenedRuntime": false,
+      "identity": null,
+      "afterPack": "./scripts/adhoc-sign.js"
     },
     "win": {
       "target": [
