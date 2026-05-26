@@ -10,18 +10,20 @@ let flaskProcess = null;
 const DEFAULT_PORT = 8899;
 let PORT = DEFAULT_PORT; // Actual port used, may differ from DEFAULT_PORT if occupied
 
-// --- PATH setup ---
+// --- PATH setup (macOS only) ---
 // When launched from a DMG, macOS resets PATH to a minimal set, losing Homebrew
 // and user-installed Python packages. We restore them here so that `yt-dlp`,
 // `ffmpeg`, and user Python scripts are discoverable by the Flask subprocess.
-const userSitePackages = path.join(os.homedir(), "Library/Python/3.9/lib/python/site-packages");
-const userBin = path.join(os.homedir(), "Library/Python/3.9/bin");
-for (const p of ["/opt/homebrew/bin", userBin]) {
-  process.env.PATH = process.env.PATH.split(":").filter(x => x !== p).join(":");
-}
-process.env.PATH = `/opt/homebrew/bin:${userBin}:${process.env.PATH}`;
-if (!process.env.PYTHONPATH || !process.env.PYTHONPATH.includes(userSitePackages)) {
-  process.env.PYTHONPATH = `${userSitePackages}:${process.env.PYTHONPATH || ""}`;
+if (process.platform === "darwin") {
+  const userSitePackages = path.join(os.homedir(), "Library/Python/3.9/lib/python/site-packages");
+  const userBin = path.join(os.homedir(), "Library/Python/3.9/bin");
+  for (const p of ["/opt/homebrew/bin", userBin]) {
+    process.env.PATH = process.env.PATH.split(":").filter(x => x !== p).join(":");
+  }
+  process.env.PATH = `/opt/homebrew/bin:${userBin}:${process.env.PATH}`;
+  if (!process.env.PYTHONPATH || !process.env.PYTHONPATH.includes(userSitePackages)) {
+    process.env.PYTHONPATH = `${userSitePackages}:${process.env.PYTHONPATH || ""}`;
+  }
 }
 
 // Detect system proxy via 3 methods (priority order). Returns proxy URL or null.
@@ -33,9 +35,35 @@ function detectProxy() {
   if (process.env.https_proxy || process.env.http_proxy)
     return process.env.https_proxy || process.env.http_proxy;
 
-  // 2. macOS system proxy (System Settings → Wi-Fi → Proxies)
+  const { execSync } = require("child_process");
+
+  // 2. Windows system proxy (Internet Explorer / Edge settings in registry)
+  if (process.platform === "win32") {
+    try {
+      const enabled = execSync(
+        'reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable',
+        { encoding: "utf8", timeout: 3000 }
+      );
+      if (enabled.includes("0x1")) {
+        const server = execSync(
+          'reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer',
+          { encoding: "utf8", timeout: 3000 }
+        );
+        const match = server.match(/ProxyServer\s+REG_SZ\s+(.+)/);
+        if (match) {
+          const proxy = `http://${match[1].trim()}`;
+          process.env.http_proxy = proxy;
+          process.env.https_proxy = proxy;
+          console.log(`[proxy] Using Windows system proxy: ${proxy}`);
+          return proxy;
+        }
+      }
+    } catch {}
+    return null;
+  }
+
+  // 3. macOS system proxy (System Settings → Wi-Fi → Proxies)
   try {
-    const { execSync } = require("child_process");
     const output = execSync("networksetup -getwebproxy Wi-Fi", { encoding: "utf8", timeout: 3000 });
     const enabled = output.match(/Enabled:\s*(Yes|No)/i);
     const server = output.match(/Server:\s*(.+)/);
@@ -49,9 +77,8 @@ function detectProxy() {
     }
   } catch {}
 
-  // 3. Shell profile fallback — source .zshrc/.bashrc to read exported proxy vars
+  // 4. Shell profile fallback — source .zshrc/.bashrc to read exported proxy vars
   try {
-    const { execSync } = require("child_process");
     const shellPath = process.env.SHELL || "/bin/zsh";
     const profile = shellPath.includes("zsh") ? ".zshrc" : ".bashrc";
     if (!/^\.(zshrc|bashrc)$/.test(profile)) return null;
