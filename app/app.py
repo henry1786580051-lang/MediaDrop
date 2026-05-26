@@ -100,22 +100,34 @@ atexit.register(cleanup_all_jobs)
 # SIGSTOP/SIGCONT are Unix-only and not available on Windows.
 if sys.platform == "win32":
     import ctypes
+    from ctypes import wintypes
 
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
     _PROCESS_SUSPEND_RESUME = 0x0800
 
+    # Set proper argtypes/restype so 64-bit HANDLE values aren't truncated
+    _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _kernel32.OpenProcess.restype = wintypes.HANDLE
+
+    _ntdll.NtSuspendProcess.argtypes = [wintypes.HANDLE]
+    _ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+
     def _suspend_process(proc):
         handle = _kernel32.OpenProcess(_PROCESS_SUSPEND_RESUME, False, proc.pid)
-        if handle:
-            _ntdll.NtSuspendProcess(handle)
-            _kernel32.CloseHandle(handle)
+        if not handle:
+            print(f"[pause] OpenProcess failed for pid {proc.pid}: last_error={ctypes.get_last_error()}", file=sys.stderr, flush=True)
+            return
+        _ntdll.NtSuspendProcess(handle)
+        _kernel32.CloseHandle(handle)
 
     def _resume_process(proc):
         handle = _kernel32.OpenProcess(_PROCESS_SUSPEND_RESUME, False, proc.pid)
-        if handle:
-            _ntdll.NtResumeProcess(handle)
-            _kernel32.CloseHandle(handle)
+        if not handle:
+            print(f"[pause] OpenProcess failed for pid {proc.pid}: last_error={ctypes.get_last_error()}", file=sys.stderr, flush=True)
+            return
+        _ntdll.NtResumeProcess(handle)
+        _kernel32.CloseHandle(handle)
 else:
     def _suspend_process(proc):
         proc.send_signal(signal.SIGSTOP)

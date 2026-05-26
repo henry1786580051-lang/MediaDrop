@@ -941,13 +941,20 @@
       try {
         const res = await fetch(`/api/pause/${c.jobId}`, { method: 'POST' });
         const data = await res.json();
-        if (data.status === 'paused') {
+        if (data.error) {
+          c.status = 'error';
+          c.error = data.error;
+        } else if (data.status === 'paused') {
           c.status = 'paused';
         } else if (data.status === 'resumed') {
           c.status = 'downloading';
         }
         renderCard(idx);
-      } catch {}
+      } catch (err) {
+        c.status = 'error';
+        c.error = err.message;
+        renderCard(idx);
+      }
     }
 
     async function cancelDl(idx) {
@@ -1021,11 +1028,17 @@
     function pollCard(idx) {
       const c = cardData[idx];
       c._pollInterval = setInterval(async () => {
-        // Ignore if user already cancelled (in-flight poll from before cancel)
         if (c.cancelRequested) return;
         try {
           const res = await fetch(`/api/status/${c.jobId}`);
           const data = await res.json();
+          // Ignore stale poll response if user cancelled while we were waiting
+          if (c.cancelRequested) {
+            if (data.status === 'done' || data.status === 'error' || data.status === 'cancelled') {
+              clearInterval(c._pollInterval);
+            }
+            return;
+          }
           if (data.progress) {
             c.progress = data.progress;
           }
