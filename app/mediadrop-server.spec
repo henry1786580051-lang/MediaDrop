@@ -35,13 +35,12 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# OneDir: EXE with exclude_binaries=True creates a minimal bootloader;
+# all binaries/zipfiles/datas are collected alongside it by COLLECT.
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    [],
+    exclude_binaries=True,
     name='mediadrop-server',
     debug=False,
     bootloader_ignore_signals=False,
@@ -51,8 +50,6 @@ exe = EXE(
     target_arch=None,
 )
 
-# onedir mode: output a directory containing the exe + all support files (DLLs, etc.)
-# This avoids runtime temp extraction and DLL loading failures on Windows.
 coll = COLLECT(
     exe,
     a.binaries,
