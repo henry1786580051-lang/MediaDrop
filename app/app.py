@@ -96,6 +96,34 @@ def cleanup_all_jobs():
 atexit.register(cleanup_all_jobs)
 
 
+# Windows pause/resume via NtSuspendProcess/NtResumeProcess (undocumented but stable since NT4)
+# SIGSTOP/SIGCONT are Unix-only and not available on Windows.
+if sys.platform == "win32":
+    import ctypes
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    _PROCESS_SUSPEND_RESUME = 0x0800
+
+    def _suspend_process(proc):
+        handle = _kernel32.OpenProcess(_PROCESS_SUSPEND_RESUME, False, proc.pid)
+        if handle:
+            _ntdll.NtSuspendProcess(handle)
+            _kernel32.CloseHandle(handle)
+
+    def _resume_process(proc):
+        handle = _kernel32.OpenProcess(_PROCESS_SUSPEND_RESUME, False, proc.pid)
+        if handle:
+            _ntdll.NtResumeProcess(handle)
+            _kernel32.CloseHandle(handle)
+else:
+    def _suspend_process(proc):
+        proc.send_signal(signal.SIGSTOP)
+
+    def _resume_process(proc):
+        proc.send_signal(signal.SIGCONT)
+
+
 def cleanup_old_jobs():
     """Remove completed/errored jobs older than 100 entries."""
     if len(jobs) > 100:
@@ -299,6 +327,10 @@ def run_download(job_id, url, format_choice, format_id, title):
 
         proc.wait()
 
+        # Don't overwrite cancelled status — user manually cancelled via UI
+        if job.get("status") == "cancelled":
+            return
+
         if proc.returncode != 0:
             job["status"] = "error"
             err_lines = [l for l in last_lines if "ERROR" in l or "error" in l.lower()]
@@ -347,8 +379,9 @@ def run_download(job_id, url, format_choice, format_id, title):
         job["progress"]["eta"] = None
 
     except Exception as e:
-        job["status"] = "error"
-        job["error"] = str(e)
+        if job.get("status") != "cancelled":
+            job["status"] = "error"
+            job["error"] = str(e)
 
 
 @app.route("/")
@@ -494,12 +527,12 @@ def pause_download(job_id):
         return jsonify({"error": "Process already finished"}), 400
     try:
         if job.get("paused"):
-            proc.send_signal(signal.SIGCONT)
+            _resume_process(proc)
             job["paused"] = False
             job["status"] = "downloading"
             return jsonify({"status": "resumed"})
         else:
-            proc.send_signal(signal.SIGSTOP)
+            _suspend_process(proc)
             job["paused"] = True
             job["status"] = "paused"
             return jsonify({"status": "paused"})

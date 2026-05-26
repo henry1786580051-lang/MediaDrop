@@ -737,7 +737,7 @@
 
     function friendlyError(err) {
       if (err.includes('Unsupported URL')) return 'This URL is not supported';
-      if (err.includes('Video unavailable')) return 'Video is unavailable or private';
+      if (err.includes('Video unavailable') || err.includes('not available')) return 'Video is unavailable or private';
       if (err.includes('Private video')) return 'This video is private';
       if (err.includes('HTTP Error 403')) return 'Access denied. Please try again later.';
       if (err.includes('HTTP Error 404')) return 'Video not found';
@@ -953,6 +953,12 @@
     async function cancelDl(idx) {
       const c = cardData[idx];
       if (!c.jobId) return;
+      // Stop poll immediately to prevent race with in-flight responses
+      c.cancelRequested = true;
+      if (c._pollInterval) {
+        clearInterval(c._pollInterval);
+        c._pollInterval = null;
+      }
       try {
         await fetch(`/api/cancel/${c.jobId}`, { method: 'POST' });
         c.status = 'cancelled';
@@ -982,6 +988,7 @@
       c.status = 'downloading';
       c.error = null;
       c.progress = {};
+      c.cancelRequested = false;
       renderCard(idx);
 
       try {
@@ -1014,6 +1021,8 @@
     function pollCard(idx) {
       const c = cardData[idx];
       c._pollInterval = setInterval(async () => {
+        // Ignore if user already cancelled (in-flight poll from before cancel)
+        if (c.cancelRequested) return;
         try {
           const res = await fetch(`/api/status/${c.jobId}`);
           const data = await res.json();
