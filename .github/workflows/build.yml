@@ -34,7 +34,55 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install dependencies
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: pip install flask pyinstaller
+
+      - name: Build Flask server with PyInstaller
+        working-directory: app
+        run: pyinstaller mediadrop-server.spec --distpath ../bin-dist
+
+      - name: Download yt-dlp
+        shell: bash
+        run: |
+          mkdir -p bundled-bin
+          if [[ "${{ matrix.platform }}" == "mac" ]]; then
+            curl -L -o bundled-bin/yt-dlp "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
+            chmod +x bundled-bin/yt-dlp
+          else
+            curl -L -o bundled-bin/yt-dlp.exe "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+          fi
+
+      - name: Download ffmpeg
+        shell: bash
+        run: |
+          if [[ "${{ matrix.platform }}" == "mac" ]]; then
+            curl -L -o ffmpeg.tar.xz "https://evermeet.cx/ffmpeg/ffmpeg-7.1.1.tar.xz"
+            tar xf ffmpeg.tar.xz -C bundled-bin/
+            chmod +x bundled-bin/ffmpeg
+          else
+            # Windows: use BtbN FFmpeg builds (static, GPL, essentials)
+            curl -L -o ffmpeg.zip "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+            7z x ffmpeg.zip -obundled-ffmpeg
+            cp bundled-ffmpeg/*/bin/ffmpeg.exe bundled-bin/ffmpeg.exe
+          fi
+
+      - name: Copy PyInstaller output to bundled-bin
+        shell: bash
+        run: |
+          if [[ "${{ matrix.platform }}" == "win" ]]; then
+            cp bin-dist/mediadrop-server.exe bundled-bin/ 2>/dev/null || \
+            cp bin-dist/mediadrop-server/mediadrop-server.exe bundled-bin/
+          else
+            cp bin-dist/mediadrop-server bundled-bin/ 2>/dev/null || \
+            cp bin-dist/mediadrop-server/mediadrop-server bundled-bin/
+            chmod +x bundled-bin/mediadrop-server
+          fi
+
+      - name: Install Node dependencies
         run: npm install
 
       - name: Build macOS DMG

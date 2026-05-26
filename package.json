@@ -1,6 +1,6 @@
 {
   "name": "mediadrop",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Self-hosted video and audio downloader",
   "author": "MediaDrop",
   "main": "main.js",
@@ -50,8 +50,18 @@
           "!venv/**",
           "!downloads/**",
           "!.git/**",
-          "!__pycache__/**"
+          "!__pycache__/**",
+          "!app.py",
+          "!Dockerfile",
+          "!requirements.txt",
+          "!start.sh",
+          "!mediadrop-server.spec"
         ]
+      },
+      {
+        "from": "./bundled-bin/",
+        "to": "bin",
+        "filter": ["**/*"]
       }
     ]
   },

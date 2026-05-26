@@ -91,18 +91,42 @@ function getResourcePath() {
   return path.join(__dirname, "app");
 }
 
-// Prefer venv Python if it exists, otherwise fall back to system python3
-function getPythonPath() {
-  const venvPython = path.join(getResourcePath(), "venv", "bin", "python3");
-  if (fs.existsSync(venvPython)) {
-    return venvPython;
+// Directory containing bundled binaries (mediadrop-server, yt-dlp, ffmpeg)
+function getBinDir() {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, "bin");
   }
+  return null;
+}
+
+// In packaged mode: return bundled mediadrop-server executable.
+// In dev mode: prefer venv Python, fall back to system python3.
+function getPythonPath() {
+  if (app.isPackaged) {
+    const binDir = getBinDir();
+    const name = process.platform === "win32" ? "mediadrop-server.exe" : "mediadrop-server";
+    const exe = path.join(binDir, name);
+    if (fs.existsSync(exe)) return exe;
+  }
+  const venvPython = path.join(getResourcePath(), "venv", "bin", "python3");
+  if (fs.existsSync(venvPython)) return venvPython;
   return "python3";
 }
 
-// Parallel check for required CLI tools. Returns names of missing ones.
+// Check required dependencies. Packaged: check bundled binaries exist on disk.
+// Dev mode: spawn each tool to verify it's on PATH.
 function checkDependencies() {
   return new Promise((resolve) => {
+    if (app.isPackaged) {
+      const binDir = getBinDir();
+      const required = process.platform === "win32"
+        ? ["mediadrop-server.exe", "yt-dlp.exe", "ffmpeg.exe"]
+        : ["mediadrop-server", "yt-dlp", "ffmpeg"];
+      const missing = required.filter(name => !fs.existsSync(path.join(binDir, name)));
+      resolve(missing);
+      return;
+    }
+
     const checks = [
       { cmd: "python3", args: ["--version"], name: "Python 3" },
       { cmd: "yt-dlp", args: ["--version"], name: "yt-dlp" },
@@ -171,30 +195,40 @@ function waitForPort(port, timeout = 15000) {
   });
 }
 
-// Launch Flask as a child process. Passes PROXY_URL so Flask can persist it to
-// config.json on first run, avoiding the need for users to configure it twice.
+// Launch Flask (or bundled mediadrop-server) as a child process.
+// In packaged mode: spawns the PyInstaller binary, sets MEDIADROP_DATA_DIR to
+// a writable userData directory so config.json and downloads persist.
+// In dev mode: spawns python3 app.py from the app/ directory.
 function startFlaskServer(proxyUrl) {
-  const appPath = getResourcePath();
   const python = getPythonPath();
-  const appPy = path.join(appPath, "app.py");
 
   return new Promise((resolve, reject) => {
     let stderrOutput = "";
     const flaskEnv = { ...process.env, PORT: String(PORT), HOST: "127.0.0.1" };
     if (proxyUrl) flaskEnv.PROXY_URL = proxyUrl;
-    flaskProcess = spawn(python, [appPy], {
-      cwd: appPath,
-      env: flaskEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+
+    let args, cwd;
+    if (app.isPackaged) {
+      // Bundled binary — no args needed, data dir goes to writable userData
+      const dataDir = path.join(app.getPath("userData"), "server");
+      fs.mkdirSync(dataDir, { recursive: true });
+      flaskEnv.MEDIADROP_DATA_DIR = dataDir;
+      args = [];
+      cwd = dataDir;
+    } else {
+      args = [path.join(getResourcePath(), "app.py")];
+      cwd = getResourcePath();
+    }
+
+    flaskProcess = spawn(python, args, { cwd, env: flaskEnv, stdio: ["ignore", "pipe", "pipe"] });
 
     flaskProcess.on("error", (err) => {
-      reject(new Error(`Failed to start Python: ${err.message}`));
+      reject(new Error(`Failed to start server: ${err.message}`));
     });
 
     flaskProcess.on("close", (code) => {
       if (code && code !== 0 && !mainWindow) {
-        reject(new Error(`Python process exited with code ${code}\n\n${stderrOutput}`));
+        reject(new Error(`Server process exited with code ${code}\n\n${stderrOutput}`));
       }
     });
 
@@ -275,10 +309,13 @@ app.whenReady().then(async () => {
   const missing = await checkDependencies();
 
   if (missing.length > 0) {
+    const message = app.isPackaged
+      ? `Bundled dependencies are missing: ${missing.join(", ")}\n\nThis is a packaging error. Please reinstall MediaDrop.`
+      : `MediaDrop requires the following to be installed:\n\n${missing.join(", ")}\n\nInstall with:\n  brew install ${missing.map((m) => m.toLowerCase().replace(" ", "-")).join(" ")}`;
     await dialog.showMessageBox({
       type: "error",
       title: "Missing Dependencies",
-      message: `MediaDrop requires the following to be installed:\n\n${missing.join(", ")}\n\nInstall with:\n  brew install ${missing.map((m) => m.toLowerCase().replace(" ", "-")).join(" ")}`,
+      message,
       buttons: ["OK"],
     });
     app.quit();

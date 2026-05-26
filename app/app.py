@@ -11,7 +11,59 @@ import socket
 
 from flask import Flask, request, jsonify, send_file, render_template
 
-app = Flask(__name__)
+
+def get_base_dir():
+    """Return the directory for writable data (config.json, downloads/).
+
+    Frozen (PyInstaller): MEDIADROP_DATA_DIR env var from Electron, or next to executable.
+    Dev: directory containing this script.
+    """
+    if getattr(sys, "frozen", False):
+        data_dir = os.environ.get("MEDIADROP_DATA_DIR")
+        if data_dir:
+            os.makedirs(data_dir, exist_ok=True)
+            return data_dir
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def get_resource_dir():
+    """Return the directory for read-only bundled resources (templates/, static/).
+
+    Frozen: sys._MEIPASS (PyInstaller temp extraction dir).
+    Dev: directory containing this script.
+    """
+    if getattr(sys, "frozen", False):
+        return sys._MEIPASS
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def get_ytdlp_path():
+    """Return path to yt-dlp binary. Bundled in frozen mode, system PATH in dev."""
+    if getattr(sys, "frozen", False):
+        bin_dir = os.path.join(os.path.dirname(sys.executable), "bin")
+        name = "yt-dlp.exe" if sys.platform == "win32" else "yt-dlp"
+        candidate = os.path.join(bin_dir, name)
+        if os.path.exists(candidate):
+            return candidate
+    return "yt-dlp"
+
+
+def get_ffmpeg_dir():
+    """Return directory containing bundled ffmpeg, or None if not bundled."""
+    if getattr(sys, "frozen", False):
+        bin_dir = os.path.join(os.path.dirname(sys.executable), "bin")
+        name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+        if os.path.exists(os.path.join(bin_dir, name)):
+            return bin_dir
+    return None
+
+
+app = Flask(
+    __name__,
+    template_folder=os.path.join(get_resource_dir(), "templates"),
+    static_folder=os.path.join(get_resource_dir(), "static"),
+)
 
 
 @app.errorhandler(BrokenPipeError)
@@ -21,7 +73,7 @@ def handle_broken_pipe(e):
     print(f"[error] Broken pipe: {e}", file=sys.stderr, flush=True)
     return jsonify({"error": "Connection lost. Please try again."}), 400
 
-CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
+CONFIG_FILE = os.path.join(get_base_dir(), "config.json")
 
 # In-memory job tracker. Each entry: { status, proc, progress, file, filename, ... }
 # Not persisted — jobs are lost on restart, which is acceptable for a desktop app.
@@ -54,7 +106,7 @@ def cleanup_old_jobs():
 
 def load_config():
     """Load config from disk, merging with defaults. Returns full dict."""
-    default_dir = os.path.join(os.path.dirname(__file__), "downloads")
+    default_dir = os.path.join(get_base_dir(), "downloads")
     defaults = {"download_dir": default_dir, "proxy_url": ""}
     if os.path.exists(CONFIG_FILE):
         try:
@@ -186,13 +238,18 @@ def run_download(job_id, url, format_choice, format_id, title):
     download_dir = get_download_dir()
     out_template = os.path.join(download_dir, f"{job_id}.%(ext)s")
 
-    cmd = ["yt-dlp", "--no-playlist", "--newline", "--progress", "-c", "-o", out_template]
+    cmd = [get_ytdlp_path(), "--no-playlist", "--newline", "--progress", "-c", "-o", out_template]
 
     # Pass --proxy flag directly to yt-dlp in addition to env vars,
     # because some yt-dlp extractors ignore env vars and only respect --proxy.
     proxy = get_proxy_url()
     if proxy:
         cmd += ["--proxy", proxy]
+
+    # Use bundled ffmpeg if available
+    ffmpeg_dir = get_ffmpeg_dir()
+    if ffmpeg_dir:
+        cmd += ["--ffmpeg-location", ffmpeg_dir]
 
     # Build format-specific yt-dlp flags
     if format_choice == "image":
@@ -316,10 +373,13 @@ def get_info():
         return jsonify({"error": "Invalid URL"}), 400
 
     try:
-        cmd = ["yt-dlp", "--no-playlist", "-j", url]
+        cmd = [get_ytdlp_path(), "--no-playlist", "-j", url]
         proxy = get_proxy_url()
         if proxy:
             cmd += ["--proxy", proxy]
+        ffmpeg_dir = get_ffmpeg_dir()
+        if ffmpeg_dir:
+            cmd += ["--ffmpeg-location", ffmpeg_dir]
         print("[info] Fetching video info", file=sys.stderr, flush=True)
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=get_ytdlp_env())
 
