@@ -13,6 +13,7 @@
     "publish": null,
     "appId": "com.mediadrop.desktop",
     "productName": "MediaDrop",
+    "afterPack": "./scripts/adhoc-sign.js",
     "mac": {
       "category": "public.app-category.utilities",
       "target": [
@@ -20,8 +21,7 @@
       ],
       "icon": "icon.png",
       "hardenedRuntime": false,
-      "identity": null,
-      "afterPack": "./scripts/adhoc-sign.js"
+      "identity": null
     },
     "win": {
       "target": [
