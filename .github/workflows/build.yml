@@ -1,5 +1,7 @@
 name: Build & Release
 
+# v1.0.2 — bundle Python/yt-dlp/ffmpeg via PyInstaller
+
 on:
   push:
     tags:
