@@ -324,7 +324,7 @@ def run_download(job_id, url, format_choice, format_id, title):
             if len(last_lines) > 10:
                 last_lines.pop(0)
             prog = parse_progress(line)
-            if prog:
+            if prog and not job.get("paused"):
                 size_m = re.search(r"of\s+~?([\d.]+\w+i?B)", line)
                 total = parse_size(size_m.group(1)) if size_m else 0
                 pct = prog["percent"]
