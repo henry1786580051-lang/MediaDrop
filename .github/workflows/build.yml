@@ -74,14 +74,9 @@ jobs:
       - name: Copy PyInstaller output to bundled-bin
         shell: bash
         run: |
-          if [[ "${{ matrix.platform }}" == "win" ]]; then
-            cp bin-dist/mediadrop-server.exe bundled-bin/ 2>/dev/null || \
-            cp bin-dist/mediadrop-server/mediadrop-server.exe bundled-bin/
-          else
-            cp bin-dist/mediadrop-server bundled-bin/ 2>/dev/null || \
-            cp bin-dist/mediadrop-server/mediadrop-server bundled-bin/
-            chmod +x bundled-bin/mediadrop-server
-          fi
+          # onedir: bin-dist/mediadrop-server/ is a directory with exe + all DLLs
+          cp -r bin-dist/mediadrop-server/* bundled-bin/
+          chmod +x bundled-bin/mediadrop-server 2>/dev/null || true
 
       - name: Install Node dependencies
         run: npm install

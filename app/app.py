@@ -41,9 +41,9 @@ def get_resource_dir():
 def get_ytdlp_path():
     """Return path to yt-dlp binary. Bundled in frozen mode, system PATH in dev."""
     if getattr(sys, "frozen", False):
-        bin_dir = os.path.join(os.path.dirname(sys.executable), "bin")
+        exe_dir = os.path.dirname(sys.executable)
         name = "yt-dlp.exe" if sys.platform == "win32" else "yt-dlp"
-        candidate = os.path.join(bin_dir, name)
+        candidate = os.path.join(exe_dir, name)
         if os.path.exists(candidate):
             return candidate
     return "yt-dlp"
@@ -52,10 +52,10 @@ def get_ytdlp_path():
 def get_ffmpeg_dir():
     """Return directory containing bundled ffmpeg, or None if not bundled."""
     if getattr(sys, "frozen", False):
-        bin_dir = os.path.join(os.path.dirname(sys.executable), "bin")
+        exe_dir = os.path.dirname(sys.executable)
         name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
-        if os.path.exists(os.path.join(bin_dir, name)):
-            return bin_dir
+        if os.path.exists(os.path.join(exe_dir, name)):
+            return exe_dir
     return None
 
 

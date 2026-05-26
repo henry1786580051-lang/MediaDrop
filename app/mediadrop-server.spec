@@ -1,6 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller spec for MediaDrop Flask server
+# Uses onedir mode (COLLECT) to avoid temp-directory DLL loading issues on Windows.
 # Usage: pyinstaller mediadrop-server.spec --distpath ../bin-dist
+
+import sys
 
 block_cipher = None
 
@@ -42,8 +45,20 @@ exe = EXE(
     name='mediadrop-server',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=True,
-    upx=True,
+    strip=sys.platform != 'win32',
+    upx=False,
     console=True,
     target_arch=None,
+)
+
+# onedir mode: output a directory containing the exe + all support files (DLLs, etc.)
+# This avoids runtime temp extraction and DLL loading failures on Windows.
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=sys.platform != 'win32',
+    upx=False,
+    name='mediadrop-server',
 )
