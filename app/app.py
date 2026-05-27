@@ -144,9 +144,10 @@ def cleanup_old_jobs():
             del jobs[k]
 
 
-def get_cookie_args():
+def get_cookie_args(cfg=None):
     """Return yt-dlp cookie arguments based on config."""
-    cfg = load_config()
+    if cfg is None:
+        cfg = load_config()
     browser = cfg.get("cookies_browser", "")
     if browser:
         return ["--cookies-from-browser", browser]
@@ -575,6 +576,9 @@ def cancel_download(job_id):
     return jsonify({"status": "cancelled"})
 
 
+VALID_BROWSERS = {"", "chrome", "firefox", "safari", "edge", "brave", "opera", "vivaldi"}
+
+
 @app.route("/api/config", methods=["GET", "POST"])
 def config():
     if request.method == "POST":
@@ -593,14 +597,20 @@ def config():
         if "proxy_url" in data:
             updates["proxy_url"] = data["proxy_url"].strip()
 
+        if "cookies_browser" in data:
+            browser = data["cookies_browser"].strip().lower()
+            if browser not in VALID_BROWSERS:
+                return jsonify({"error": f"Unsupported browser: {browser}"}), 400
+            updates["cookies_browser"] = browser
+
         if updates:
             save_config(updates)
 
         cfg = load_config()
-        return jsonify({"download_dir": cfg["download_dir"], "proxy_url": cfg["proxy_url"]})
+        return jsonify({"download_dir": cfg["download_dir"], "proxy_url": cfg["proxy_url"], "cookies_browser": cfg["cookies_browser"]})
 
     cfg = load_config()
-    return jsonify({"download_dir": cfg["download_dir"], "proxy_url": cfg["proxy_url"]})
+    return jsonify({"download_dir": cfg["download_dir"], "proxy_url": cfg["proxy_url"], "cookies_browser": cfg["cookies_browser"]})
 
 
 def signal_handler(sig, frame):

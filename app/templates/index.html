@@ -564,6 +564,7 @@
           </select>
           <button onclick="saveCookies()">Apply</button>
         </div>
+        <p class="hint" style="margin:4px 0 0;font-size:0.75rem;">Select browser to bypass YouTube bot detection. Must be logged into YouTube.</p>
         <div class="settings-msg" id="settingsMsg"></div>
       </div>
     </div>
@@ -595,7 +596,7 @@
       arrow.classList.toggle('open');
     }
 
-    async function loadPath() {
+    async function loadSettings() {
       try {
         const res = await fetch('/api/config');
         const data = await res.json();
@@ -699,7 +700,7 @@
       }
     }
 
-    loadPath();
+    loadSettings();
 
     async function browsePath() {
       if (window.electronAPI && window.electronAPI.selectFolder) {
@@ -779,8 +780,8 @@
       if (err.includes('Private video')) return 'This video is private';
       if (err.includes('HTTP Error 403')) return 'Access denied. Please try again later.';
       if (err.includes('HTTP Error 404')) return 'Video not found';
-      if (err.includes('Sign in to confirm')) return 'This video requires authentication.';
-      if (err.includes('cookies')) return 'Access denied. Please try again later.';
+      if (err.includes('Sign in to confirm')) return 'YouTube requires authentication — select your browser in Settings > Cookies.';
+      if (err.includes('cookies')) return 'Cookie error — make sure your browser is logged into YouTube, then try again.';
       if (err.includes('copyright')) return 'Video blocked due to copyright';
       if (err.includes('geo')) return 'Video not available in your region';
       if (err.includes('timed out') || err.includes('Timed out')) return 'Request timed out — try again';
