@@ -145,9 +145,17 @@ def cleanup_old_jobs():
 
 
 def get_cookie_args(cfg=None):
-    """Return yt-dlp cookie arguments based on config."""
+    """Return yt-dlp cookie arguments based on config.
+
+    Priority: cookies_file > cookies_browser.
+    For Safari on macOS, --cookies-from-browser fails due to sandboxing,
+    so users should export cookies to a file and use cookies_file instead.
+    """
     if cfg is None:
         cfg = load_config()
+    cookies_file = cfg.get("cookies_file", "")
+    if cookies_file and os.path.isfile(cookies_file):
+        return ["--cookies", cookies_file]
     browser = cfg.get("cookies_browser", "")
     if browser:
         return ["--cookies-from-browser", browser]
@@ -157,7 +165,7 @@ def get_cookie_args(cfg=None):
 def load_config():
     """Load config from disk, merging with defaults. Returns full dict."""
     default_dir = os.path.join(get_base_dir(), "downloads")
-    defaults = {"download_dir": default_dir, "proxy_url": "", "cookies_browser": ""}
+    defaults = {"download_dir": default_dir, "proxy_url": "", "cookies_browser": "", "cookies_file": ""}
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE) as f:
@@ -443,6 +451,9 @@ def get_info():
         if result.returncode != 0:
             err_detail = result.stderr.strip()
             print(f"[info] yt-dlp failed: {err_detail[:200]}", file=sys.stderr, flush=True)
+            # Provide helpful message for Safari cookie sandbox issue
+            if "Operation not permitted" in err_detail and "Safari" in err_detail:
+                return jsonify({"error": "Safari cookies blocked by macOS sandbox. Use Chrome/Firefox or provide a cookies.txt file in Settings."}), 400
             return jsonify({"error": err_detail.split("\n")[-1]}), 400
 
         info = json.loads(result.stdout)
@@ -576,7 +587,7 @@ def cancel_download(job_id):
     return jsonify({"status": "cancelled"})
 
 
-VALID_BROWSERS = {"", "chrome", "firefox", "edge", "brave", "opera", "vivaldi"}
+VALID_BROWSERS = {"", "chrome", "firefox", "safari", "edge", "brave", "opera", "vivaldi"}
 
 
 @app.route("/api/config", methods=["GET", "POST"])
@@ -603,14 +614,20 @@ def config():
                 return jsonify({"error": f"Unsupported browser: {browser}"}), 400
             updates["cookies_browser"] = browser
 
+        if "cookies_file" in data:
+            cookies_file = data["cookies_file"].strip()
+            if cookies_file and not os.path.isfile(cookies_file):
+                return jsonify({"error": f"Cookies file not found: {cookies_file}"}), 400
+            updates["cookies_file"] = cookies_file
+
         if updates:
             save_config(updates)
 
         cfg = load_config()
-        return jsonify({"download_dir": cfg["download_dir"], "proxy_url": cfg["proxy_url"], "cookies_browser": cfg["cookies_browser"]})
+        return jsonify({"download_dir": cfg["download_dir"], "proxy_url": cfg["proxy_url"], "cookies_browser": cfg["cookies_browser"], "cookies_file": cfg["cookies_file"]})
 
     cfg = load_config()
-    return jsonify({"download_dir": cfg["download_dir"], "proxy_url": cfg["proxy_url"], "cookies_browser": cfg["cookies_browser"]})
+    return jsonify({"download_dir": cfg["download_dir"], "proxy_url": cfg["proxy_url"], "cookies_browser": cfg["cookies_browser"], "cookies_file": cfg["cookies_file"]})
 
 
 def signal_handler(sig, frame):
