@@ -89,7 +89,7 @@
 
 <img src="app/assets/macOS-step1-gatekeeper.png" alt="步骤1：Gatekeeper 安全警告" width="500">
 
-点击右上角「完成」关闭此对话框。
+点击「完成」关闭此对话框。
 
 **第二步：前往隐私与安全性设置**
 
