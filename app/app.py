@@ -144,10 +144,19 @@ def cleanup_old_jobs():
             del jobs[k]
 
 
+def get_cookie_args():
+    """Return yt-dlp cookie arguments based on config."""
+    cfg = load_config()
+    browser = cfg.get("cookies_browser", "")
+    if browser:
+        return ["--cookies-from-browser", browser]
+    return []
+
+
 def load_config():
     """Load config from disk, merging with defaults. Returns full dict."""
     default_dir = os.path.join(get_base_dir(), "downloads")
-    defaults = {"download_dir": default_dir, "proxy_url": ""}
+    defaults = {"download_dir": default_dir, "proxy_url": "", "cookies_browser": ""}
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE) as f:
@@ -285,6 +294,7 @@ def run_download(job_id, url, format_choice, format_id, title):
     proxy = get_proxy_url()
     if proxy:
         cmd += ["--proxy", proxy]
+    cmd += get_cookie_args()
 
     # Use bundled ffmpeg if available
     ffmpeg_dir = get_ffmpeg_dir()
@@ -422,6 +432,7 @@ def get_info():
         proxy = get_proxy_url()
         if proxy:
             cmd += ["--proxy", proxy]
+        cmd += get_cookie_args()
         ffmpeg_dir = get_ffmpeg_dir()
         if ffmpeg_dir:
             cmd += ["--ffmpeg-location", ffmpeg_dir]

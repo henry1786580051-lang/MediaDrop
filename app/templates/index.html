@@ -551,6 +551,19 @@
           <button class="browse-btn" onclick="autoDetectProxy()">Detect</button>
           <button onclick="saveProxy()">Apply</button>
         </div>
+        <div class="settings-row" style="margin-top:8px">
+          <select id="cookiesBrowser" style="flex:1; padding:8px 10px; background:var(--bg); color:var(--fg); border:1px solid #333; border-radius:6px; font-size:0.9rem;">
+            <option value="">No cookies (default)</option>
+            <option value="chrome">Chrome</option>
+            <option value="firefox">Firefox</option>
+            <option value="safari">Safari</option>
+            <option value="edge">Edge</option>
+            <option value="brave">Brave</option>
+            <option value="opera">Opera</option>
+            <option value="vivaldi">Vivaldi</option>
+          </select>
+          <button onclick="saveCookies()">Apply</button>
+        </div>
         <div class="settings-msg" id="settingsMsg"></div>
       </div>
     </div>
@@ -588,6 +601,7 @@
         const data = await res.json();
         document.getElementById('dlPath').value = data.download_dir || '';
         document.getElementById('proxyUrl').value = data.proxy_url || '';
+        document.getElementById('cookiesBrowser').value = data.cookies_browser || '';
       } catch {}
     }
 
@@ -633,6 +647,30 @@
           msg.className = 'settings-msg ok';
           msg.textContent = 'Proxy updated';
           input.value = data.proxy_url || '';
+          setTimeout(() => { msg.textContent = ''; }, 2000);
+        }
+      } catch (err) {
+        msg.className = 'settings-msg err';
+        msg.textContent = err.message;
+      }
+    }
+
+    async function saveCookies() {
+      const select = document.getElementById('cookiesBrowser');
+      const msg = document.getElementById('settingsMsg');
+      try {
+        const res = await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cookies_browser: select.value }),
+        });
+        const data = await res.json();
+        if (data.error) {
+          msg.className = 'settings-msg err';
+          msg.textContent = data.error;
+        } else {
+          msg.className = 'settings-msg ok';
+          msg.textContent = select.value ? `Cookies: ${select.value}` : 'Cookies disabled';
           setTimeout(() => { msg.textContent = ''; }, 2000);
         }
       } catch (err) {
