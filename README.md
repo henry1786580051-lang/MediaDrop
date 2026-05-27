@@ -81,7 +81,29 @@
 2. 双击打开 DMG，将 MediaDrop 拖入 Applications 文件夹
 3. 在启动台或 Applications 中找到 MediaDrop 并打开
 
-⚠️ 首次打开可能提示"无法验证开发者"，请在 **系统设置 → 隐私与安全性** 中点击「仍要打开」。
+#### ⚠️ 首次打开的安全提示（正常现象）
+
+由于本项目未注册 Apple Developer Program（$99/年），macOS 会弹出安全警告。这是正常现象，按以下步骤操作即可：
+
+**第一步：打开应用时弹出安全警告**
+
+<img src="app/assets/macOS-step1-gatekeeper.png" alt="步骤1：Gatekeeper 安全警告" width="500">
+
+点击右上角「完成」关闭此对话框。
+
+**第二步：前往隐私与安全性设置**
+
+<img src="app/assets/macOS-step2-privacy.png" alt="步骤2：隐私与安全性" width="500">
+
+打开 **系统设置 → 隐私与安全性**，下滑找到安全提示，点击「仍要打开」。
+
+**第三步：确认打开**
+
+<img src="app/assets/macOS-step3-open-anyway.png" alt="步骤3：仍要打开" width="500">
+
+输入密码确认，即可正常使用。
+
+> 💡 此警告仅在首次打开时出现，后续启动无需重复操作。
 
 </details>
 
