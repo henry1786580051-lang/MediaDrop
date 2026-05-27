@@ -576,7 +576,7 @@ def cancel_download(job_id):
     return jsonify({"status": "cancelled"})
 
 
-VALID_BROWSERS = {"", "chrome", "firefox", "safari", "edge", "brave", "opera", "vivaldi"}
+VALID_BROWSERS = {"", "chrome", "firefox", "edge", "brave", "opera", "vivaldi"}
 
 
 @app.route("/api/config", methods=["GET", "POST"])
