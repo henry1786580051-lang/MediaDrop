@@ -50,16 +50,17 @@ jobs:
         run: |
           mkdir -p bundled-bin
           curl -L -o bundled-bin/yt-dlp "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
+          # Trim universal binary to arm64-only to avoid macOS "Intel chip" warning
+          lipo bundled-bin/yt-dlp -thin arm64 -output bundled-bin/yt-dlp 2>/dev/null || true
           chmod +x bundled-bin/yt-dlp
 
-      - name: Download ffmpeg (static build)
+      - name: Download ffmpeg (static arm64 build)
         shell: bash
         run: |
           mkdir -p bundled-bin
-          curl -L -o ffmpeg.zip "https://evermeet.cx/ffmpeg/ffmpeg-8.1.1.zip"
-          unzip -o ffmpeg.zip -d bundled-bin
+          curl -L -o bundled-bin/ffmpeg.gz "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-arm64.gz"
+          gunzip -f bundled-bin/ffmpeg.gz
           chmod +x bundled-bin/ffmpeg
-          rm -f ffmpeg.zip
 
       - name: Copy PyInstaller output to bundled-bin
         shell: bash
