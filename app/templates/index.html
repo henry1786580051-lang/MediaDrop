@@ -563,7 +563,12 @@
           </select>
           <button onclick="saveCookies()">Apply</button>
         </div>
-        <p class="hint" style="margin:6px 0 0;font-size:0.75rem;">Select the browser where you are logged into YouTube. Safari is not supported (macOS sandbox restriction). If you use Safari, just open Chrome or Firefox and log into YouTube once — no need to switch your main browser.</p>
+        <div class="settings-row" style="margin-top:8px">
+          <input id="cookiesFile" type="text" placeholder="cookies.txt path (optional, overrides browser cookies)">
+          <button class="browse-btn" onclick="browseCookieFile()">Browse</button>
+          <button onclick="saveCookieFile()">Apply</button>
+        </div>
+        <p class="hint" style="margin:6px 0 0;font-size:0.75rem;">For YouTube login-only videos, select a browser where you are logged into YouTube, or import a cookies.txt file. Safari is not supported by browser-cookie extraction on macOS.</p>
         <div class="settings-msg" id="settingsMsg"></div>
       </div>
     </div>
@@ -602,6 +607,7 @@
         document.getElementById('dlPath').value = data.download_dir || '';
         document.getElementById('proxyUrl').value = data.proxy_url || '';
         document.getElementById('cookiesBrowser').value = data.cookies_browser || '';
+        document.getElementById('cookiesFile').value = data.cookies_file || '';
       } catch {}
     }
 
@@ -679,6 +685,31 @@
       }
     }
 
+    async function saveCookieFile() {
+      const input = document.getElementById('cookiesFile');
+      const msg = document.getElementById('settingsMsg');
+      try {
+        const res = await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cookies_file: input.value }),
+        });
+        const data = await res.json();
+        if (data.error) {
+          msg.className = 'settings-msg err';
+          msg.textContent = data.error;
+        } else {
+          msg.className = 'settings-msg ok';
+          msg.textContent = data.cookies_file ? 'Cookie file updated' : 'Cookie file cleared';
+          input.value = data.cookies_file || '';
+          setTimeout(() => { msg.textContent = ''; }, 2000);
+        }
+      } catch (err) {
+        msg.className = 'settings-msg err';
+        msg.textContent = err.message;
+      }
+    }
+
     async function autoDetectProxy() {
       const input = document.getElementById('proxyUrl');
       const msg = document.getElementById('settingsMsg');
@@ -696,6 +727,16 @@
         msg.className = 'settings-msg err';
         msg.textContent = 'Auto-detect requires desktop app';
         setTimeout(() => { msg.textContent = ''; }, 2000);
+      }
+    }
+
+    async function browseCookieFile() {
+      if (window.electronAPI && window.electronAPI.selectCookieFile) {
+        const file = await window.electronAPI.selectCookieFile();
+        if (file) {
+          document.getElementById('cookiesFile').value = file;
+          saveCookieFile();
+        }
       }
     }
 
@@ -756,6 +797,16 @@
       renderCard(idx);
     }
 
+    function currentCardFormat(idx) {
+      const active = document.querySelector(`#card-${idx} .fmt-pill.active`);
+      const fmt = active ? active.dataset.format : '';
+      if (fmt) {
+        cardData[idx].format = fmt;
+        return fmt;
+      }
+      return cardData[idx].format || 'video';
+    }
+
     function parseUrls(text) {
       return [...new Set(text.split(/[\s,]+/).map(u => u.trim()).filter(u => u.startsWith('http')))];
     }
@@ -779,9 +830,9 @@
       if (err.includes('Private video')) return 'This video is private';
       if (err.includes('HTTP Error 403')) return 'Access denied. Please try again later.';
       if (err.includes('HTTP Error 404')) return 'Video not found';
-      if (err.includes('Sign in to confirm')) return 'YouTube requires authentication — select your browser in Settings > Cookies.';
+      if (err.includes('Sign in to confirm')) return 'YouTube requires authentication — select a logged-in browser or cookies.txt in Settings.';
       if (err.includes('Operation not permitted') && err.includes('Safari')) return 'Safari is not supported. Open Chrome or Firefox, log into YouTube, then select that browser in Settings.';
-      if (err.includes('cookies')) return 'Cookie error — make sure your browser is logged into YouTube, then try again.';
+      if (err.includes('cookies')) return 'Cookie error — make sure your browser is logged into YouTube, or import a valid cookies.txt file.';
       if (err.includes('copyright')) return 'Video blocked due to copyright';
       if (err.includes('geo')) return 'Video not available in your region';
       if (err.includes('timed out') || err.includes('Timed out')) return 'Request timed out — try again';
@@ -906,9 +957,9 @@
 
       // Format pills
       const fmtPills = `<div class="fmt-pills">
-        <button class="fmt-pill${cardFmt === 'video' ? ' active' : ''}" onclick="setCardFormat(${idx}, 'video')">MP4</button>
-        <button class="fmt-pill${cardFmt === 'audio' ? ' active' : ''}" onclick="setCardFormat(${idx}, 'audio')">MP3</button>
-        <button class="fmt-pill${cardFmt === 'image' ? ' active' : ''}" onclick="setCardFormat(${idx}, 'image')">JPG</button>
+        <button class="fmt-pill${cardFmt === 'video' ? ' active' : ''}" data-format="video" onclick="setCardFormat(${idx}, 'video')">MP4</button>
+        <button class="fmt-pill${cardFmt === 'audio' ? ' active' : ''}" data-format="audio" onclick="setCardFormat(${idx}, 'audio')">MP3</button>
+        <button class="fmt-pill${cardFmt === 'image' ? ' active' : ''}" data-format="image" onclick="setCardFormat(${idx}, 'image')">JPG</button>
       </div>`;
 
       // Quality chips (only for video)
@@ -955,10 +1006,14 @@
             <button class="card-dl-btn" onclick="dlCard(${idx})">Re-download</button>
           </div>`;
       } else if (c.status === 'error') {
-        actionHtml = `<button class="card-dl-btn" onclick="dlCard(${idx})">Retry</button>
+        actionHtml = `${fmtPills}
+          ${!isAudio && !isImage && qualityChips ? '<div class="quality-row">' + qualityChips + '</div>' : ''}
+          <button class="card-dl-btn" onclick="dlCard(${idx})">Retry</button>
           <span class="card-status error">${esc(friendlyError(c.error || 'Download failed'))}</span>`;
       } else if (c.status === 'cancelled') {
         actionHtml = `<span class="card-status error">Cancelled</span>
+          ${fmtPills}
+          ${!isAudio && !isImage && qualityChips ? '<div class="quality-row">' + qualityChips + '</div>' : ''}
           <button class="card-dl-btn" onclick="dlCard(${idx})">Download</button>`;
       }
 
@@ -1031,6 +1086,7 @@
 
     async function dlCard(idx) {
       const c = cardData[idx];
+      const requestedFormat = currentCardFormat(idx);
       c.status = 'downloading';
       c.error = null;
       c.progress = {};
@@ -1043,7 +1099,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             url: c.url,
-            format: c.format || 'video',
+            format: requestedFormat,
             format_id: c.selectedFormatId,
             title: c.title || '',
           }),

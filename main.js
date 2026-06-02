@@ -325,6 +325,18 @@ ipcMain.handle("select-folder", async () => {
   return result.filePaths[0];
 });
 
+ipcMain.handle("select-cookie-file", async () => {
+  const result = await dialog.showOpenDialog(mainWindow || undefined, {
+    properties: ["openFile"],
+    filters: [
+      { name: "Cookie files", extensions: ["txt"] },
+      { name: "All files", extensions: ["*"] },
+    ],
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
+});
+
 ipcMain.handle("detect-proxy", () => {
   const url = detectProxy();
   return url || "";

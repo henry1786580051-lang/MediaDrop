@@ -42,3 +42,9 @@ assets/*.mp4
 # Duplicate project directories
 mediadrop/
 reclip/
+
+# CodeGraph
+.codegraph/
+
+# Local notes
+提示/

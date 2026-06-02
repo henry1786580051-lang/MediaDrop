@@ -148,6 +148,11 @@ def get_cookie_args(cfg=None):
     """Return yt-dlp cookie arguments based on config."""
     if cfg is None:
         cfg = load_config()
+    cookie_file = cfg.get("cookies_file", "")
+    if cookie_file:
+        cookie_file = os.path.expanduser(cookie_file)
+        if os.path.isfile(cookie_file):
+            return ["--cookies", cookie_file]
     browser = cfg.get("cookies_browser", "")
     if browser:
         return ["--cookies-from-browser", browser]
@@ -157,7 +162,7 @@ def get_cookie_args(cfg=None):
 def load_config():
     """Load config from disk, merging with defaults. Returns full dict."""
     default_dir = os.path.join(get_base_dir(), "downloads")
-    defaults = {"download_dir": default_dir, "proxy_url": "", "cookies_browser": ""}
+    defaults = {"download_dir": default_dir, "proxy_url": "", "cookies_browser": "", "cookies_file": ""}
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE) as f:
@@ -606,14 +611,30 @@ def config():
                 return jsonify({"error": f"Unsupported browser: {browser}"}), 400
             updates["cookies_browser"] = browser
 
+        if "cookies_file" in data:
+            cookie_file = os.path.expanduser(data["cookies_file"].strip())
+            if cookie_file and not os.path.isfile(cookie_file):
+                return jsonify({"error": "Cookie file does not exist"}), 400
+            updates["cookies_file"] = cookie_file
+
         if updates:
             save_config(updates)
 
         cfg = load_config()
-        return jsonify({"download_dir": cfg["download_dir"], "proxy_url": cfg["proxy_url"], "cookies_browser": cfg["cookies_browser"]})
+        return jsonify({
+            "download_dir": cfg["download_dir"],
+            "proxy_url": cfg["proxy_url"],
+            "cookies_browser": cfg["cookies_browser"],
+            "cookies_file": cfg["cookies_file"],
+        })
 
     cfg = load_config()
-    return jsonify({"download_dir": cfg["download_dir"], "proxy_url": cfg["proxy_url"], "cookies_browser": cfg["cookies_browser"]})
+    return jsonify({
+        "download_dir": cfg["download_dir"],
+        "proxy_url": cfg["proxy_url"],
+        "cookies_browser": cfg["cookies_browser"],
+        "cookies_file": cfg["cookies_file"],
+    })
 
 
 def signal_handler(sig, frame):
