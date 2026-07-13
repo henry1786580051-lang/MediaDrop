@@ -6,6 +6,8 @@ dist/
 build/
 bundled-bin/
 bin-dist/
+*.dmg
+*.dmg.blockmap
 
 # Python
 venv/
@@ -15,12 +17,15 @@ __pycache__/
 
 # Downloads
 downloads/
+app/tools/
 
 # Environment
 .env
 .env.local
 .env.production
 .env.development
+app/config.json
+app/.mediadrop-cache/
 
 # OS files
 .DS_Store

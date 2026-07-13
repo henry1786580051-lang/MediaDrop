@@ -1,59 +1,57 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MediaDrop — Free Media Downloader</title>
+  <title>MediaDrop — 免费媒体下载器</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #f4f1eb;
-      --fg: #3a3a38;
+      --bg: #f3f4f2;
+      --fg: #292b29;
       --accent: #e85d2a;
       --accent-hover: #d04e1f;
-      --muted: #9c9889;
+      --muted: #777b75;
       --card: #fff;
-      --card-border: #e2ded6;
+      --card-border: #dfe2dd;
+      --soft: #f7f8f6;
       --success: #2d8a4e;
       --error: #c43d3d;
-      --radius: 14px;
+      --radius: 8px;
       --shimmer: linear-gradient(90deg, #ebe8e2 25%, #f0ede7 50%, #ebe8e2 75%);
     }
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
     body {
-      font-family: 'DM Mono', monospace;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
       background: var(--bg);
       color: var(--fg);
       min-height: 100vh;
       overflow-x: hidden;
     }
 
-    body::after {
-      content: '';
-      position: fixed;
-      inset: 0;
-      opacity: 0.03;
-      pointer-events: none;
-      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
-      background-size: 128px;
-    }
-
     .page {
-      max-width: 620px;
+      max-width: 920px;
       margin: 0 auto;
-      padding: 60px 24px 80px;
+      padding: 56px 32px 72px;
     }
 
-    .brand { margin-bottom: 48px; }
+    .app-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 38px;
+    }
+    .brand { min-width: 0; }
     .brand h1 {
       font-family: 'Instrument Serif', serif;
       font-size: 4.2rem;
       font-weight: 400;
-      letter-spacing: -0.03em;
+      letter-spacing: 0;
       line-height: 1;
       color: var(--fg);
     }
@@ -66,6 +64,30 @@
       text-transform: uppercase;
     }
 
+    .settings-launcher {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 38px;
+      padding: 0 14px;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      background: var(--card);
+      color: var(--fg);
+      font: 600 0.76rem/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      cursor: pointer;
+      box-shadow: 0 1px 2px rgba(28, 32, 28, 0.04);
+    }
+    .settings-launcher:hover { border-color: #bfc4bd; background: var(--soft); }
+    .settings-launcher .gear { font-size: 1rem; line-height: 1; }
+
+    .url-composer {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 132px;
+      align-items: stretch;
+      gap: 10px;
+    }
+
     textarea {
       width: 100%;
       padding: 18px 20px;
@@ -73,13 +95,13 @@
       border-radius: var(--radius);
       background: var(--card);
       color: var(--fg);
-      font-family: 'DM Mono', monospace;
-      font-size: 0.88rem;
+      font-family: inherit;
+      font-size: 0.92rem;
       outline: none;
       resize: none;
       min-height: 56px;
       transition: border-color 0.25s, box-shadow 0.25s;
-      margin-bottom: 6px;
+      margin-bottom: 0;
     }
     textarea:focus {
       border-color: var(--accent);
@@ -88,10 +110,10 @@
     textarea::placeholder { color: var(--muted); }
 
     .hint {
-      font-size: 0.7rem;
+      font-size: 0.75rem;
       color: var(--muted);
-      margin-bottom: 20px;
-      letter-spacing: 0.02em;
+      margin: 8px 0 20px;
+      letter-spacing: 0;
     }
 
     .controls {
@@ -102,18 +124,18 @@
     }
 
     .fetch-btn {
-      flex: 1;
+      width: 100%;
       padding: 10px 20px;
       border: none;
       border-radius: 10px;
       background: var(--accent);
       color: #fff;
-      font-family: 'DM Mono', monospace;
+      font-family: inherit;
       font-size: 0.82rem;
       font-weight: 500;
       cursor: pointer;
       transition: background 0.2s, transform 0.1s;
-      letter-spacing: 0.04em;
+      letter-spacing: 0;
       text-transform: uppercase;
     }
     .fetch-btn:hover { background: var(--accent-hover); }
@@ -129,8 +151,9 @@
       border: 1.5px solid var(--card-border);
       border-radius: var(--radius);
       background: var(--card);
-      padding: 14px;
-      margin-bottom: 10px;
+      padding: 16px;
+      margin-bottom: 12px;
+      box-shadow: 0 1px 2px rgba(28, 32, 28, 0.03);
       animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1);
     }
     @keyframes slideUp {
@@ -301,6 +324,30 @@
       width: 100%;
       margin-top: 6px;
     }
+    .range-pills {
+      display: flex;
+      gap: 0;
+      border: 1.5px solid var(--card-border);
+      border-radius: 8px;
+      overflow: hidden;
+      width: 100%;
+      margin-top: 6px;
+    }
+    .range-pill {
+      flex: 1;
+      min-width: 0;
+      padding: 5px 8px;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      font-family: 'DM Mono', monospace;
+      font-size: 0.62rem;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .range-pill.active { background: var(--fg); color: var(--bg); }
+    .range-pill:not(.active):hover { color: var(--fg); }
+    .range-pill:disabled { opacity: 0.4; cursor: not-allowed; }
 
     .done-btns {
       display: flex;
@@ -400,91 +447,121 @@
       line-height: 1.8;
     }
 
-    /* Settings */
-    .settings {
-      margin-bottom: 20px;
-      border: 1.5px solid var(--card-border);
-      border-radius: var(--radius);
+    /* Settings drawer */
+    .settings-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 40;
+      background: rgba(25, 28, 25, 0.28);
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.2s ease, visibility 0.2s ease;
+    }
+    .settings-backdrop.open { opacity: 1; visibility: visible; }
+    .settings-drawer {
+      position: fixed;
+      top: 0;
+      right: 0;
+      z-index: 41;
+      width: min(420px, 100vw);
+      height: 100vh;
       background: var(--card);
-      overflow: hidden;
+      border-left: 1px solid var(--card-border);
+      box-shadow: -16px 0 48px rgba(23, 27, 23, 0.12);
+      transform: translateX(100%);
+      transition: transform 0.24s cubic-bezier(0.2, 0.8, 0.2, 1);
+      display: flex;
+      flex-direction: column;
     }
-    .settings-toggle {
-      width: 100%;
-      padding: 10px 16px;
-      border: none;
+    .settings-drawer.open { transform: translateX(0); }
+    body.drawer-open { overflow: hidden; }
+    .drawer-header {
+      min-height: 66px;
+      padding: 0 20px 0 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--card-border);
+    }
+    .drawer-header h2 { font-size: 1rem; font-weight: 650; }
+    .icon-btn {
+      width: 34px;
+      height: 34px;
+      display: inline-grid;
+      place-items: center;
+      border: 0;
+      border-radius: 6px;
       background: transparent;
-      font-family: 'DM Mono', monospace;
-      font-size: 0.72rem;
       color: var(--muted);
+      font-size: 1.35rem;
       cursor: pointer;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      letter-spacing: 0.03em;
-      text-transform: uppercase;
     }
-    .settings-toggle:hover { color: var(--fg); }
-    .settings-toggle .arrow { transition: transform 0.2s; font-size: 0.6rem; }
-    .settings-toggle .arrow.open { transform: rotate(90deg); }
-    .settings-body { display: none; padding: 0 16px 14px; }
-    .settings-body.open { display: block; }
-    .settings-drop {
-      border: 1.5px dashed var(--card-border);
-      border-radius: 8px;
-      padding: 12px;
-      text-align: center;
-      font-size: 0.7rem;
-      color: var(--muted);
-      transition: border-color 0.2s, background 0.2s;
-      margin-bottom: 8px;
-    }
-    .settings-drop.drag-over {
-      border-color: var(--accent);
-      background: rgba(232, 93, 42, 0.04);
-      color: var(--accent);
-    }
-    .settings-row {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-    }
-    .settings-row input {
+    .icon-btn:hover { background: var(--soft); color: var(--fg); }
+    .drawer-content {
       flex: 1;
-      padding: 8px 12px;
-      border: 1.5px solid var(--card-border);
-      border-radius: 8px;
-      background: var(--bg);
+      overflow-y: auto;
+      padding: 8px 24px 24px;
+    }
+    .settings-section { padding: 22px 0; border-bottom: 1px solid var(--card-border); }
+    .settings-section:last-child { border-bottom: 0; }
+    .settings-section h3 { margin-bottom: 14px; font-size: 0.78rem; font-weight: 700; color: var(--fg); }
+    .field { display: block; margin-top: 14px; }
+    .field:first-of-type { margin-top: 0; }
+    .field-label { display: block; margin-bottom: 7px; font-size: 0.72rem; font-weight: 600; color: var(--muted); }
+    .field-control { display: flex; gap: 8px; align-items: stretch; }
+    .field-control input,
+    .field-control select {
+      min-width: 0;
+      flex: 1;
+      height: 38px;
+      padding: 0 11px;
+      border: 1px solid var(--card-border);
+      border-radius: 7px;
+      background: var(--soft);
       color: var(--fg);
-      font-family: 'DM Mono', monospace;
-      font-size: 0.76rem;
+      font: 0.78rem/1.2 'DM Mono', monospace;
       outline: none;
     }
-    .settings-row input:focus { border-color: var(--accent); }
-    .settings-row button {
-      padding: 8px 16px;
-      border: none;
-      border-radius: 8px;
-      background: var(--fg);
-      color: var(--bg);
-      font-family: 'DM Mono', monospace;
-      font-size: 0.72rem;
+    .field-control select { font-family: inherit; }
+    .field-control input:focus,
+    .field-control select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(232, 93, 42, 0.08); }
+    .secondary-btn,
+    .primary-btn {
+      min-height: 38px;
+      padding: 0 13px;
+      border-radius: 7px;
+      font: 600 0.72rem/1 inherit;
       cursor: pointer;
-      letter-spacing: 0.03em;
-      text-transform: uppercase;
       white-space: nowrap;
     }
-    .settings-row button:hover { background: #2d2d2a; }
-    .settings-row button.browse-btn {
-      background: transparent;
-      color: var(--fg);
-      border: 1.5px solid var(--card-border);
+    .secondary-btn { border: 1px solid var(--card-border); background: var(--card); color: var(--fg); }
+    .secondary-btn:hover { background: var(--soft); border-color: #bdc2bb; }
+    .primary-btn { border: 1px solid var(--fg); background: var(--fg); color: #fff; }
+    .primary-btn:hover { background: #181a18; }
+    .field-help { margin-top: 7px; color: var(--muted); font-size: 0.69rem; line-height: 1.45; }
+    .settings-drop.drag-over input { border-color: var(--accent); background: rgba(232, 93, 42, 0.04); }
+    .conditional-field[hidden] { display: none; }
+    .status-line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+      font-size: 0.73rem;
     }
-    .settings-row button.browse-btn:hover { border-color: var(--fg); }
+    .status-line strong { font-family: 'DM Mono', monospace; font-size: 0.7rem; font-weight: 500; }
+    .tool-actions { display: flex; gap: 8px; flex-wrap: wrap; }
     .settings-msg {
-      font-size: 0.65rem;
-      margin-top: 6px;
-      min-height: 1em;
+      position: sticky;
+      bottom: 0;
+      min-height: 42px;
+      padding: 12px 24px;
+      border-top: 1px solid var(--card-border);
+      background: rgba(255, 255, 255, 0.96);
+      color: var(--muted);
+      font-size: 0.72rem;
     }
+    .settings-msg:empty { display: none; }
     .settings-msg.ok { color: var(--success); }
     .settings-msg.err { color: var(--error); }
 
@@ -516,6 +593,11 @@
     @media (max-width: 500px) {
       .brand h1 { font-size: 3rem; }
       .page { padding: 40px 16px 60px; }
+      .app-header { margin-bottom: 28px; }
+      .settings-launcher { width: 38px; padding: 0; justify-content: center; }
+      .settings-launcher .label { display: none; }
+      .url-composer { grid-template-columns: 1fr; }
+      .url-composer .fetch-btn { min-height: 44px; }
       .card { flex-direction: column; gap: 10px; }
       .card-thumb {
         width: 100%;
@@ -525,79 +607,156 @@
       .card-title { white-space: normal; }
       .controls { flex-wrap: wrap; }
       .fetch-btn { width: 100%; }
+      .drawer-content { padding-left: 18px; padding-right: 18px; }
     }
   </style>
 </head>
 <body>
   <div class="page">
-    <div class="brand">
-      <h1>Media<em>Drop</em></h1>
-      <p>Free media downloader</p>
-    </div>
-
-    <div class="settings">
-      <button class="settings-toggle" onclick="toggleSettings()">
-        <span class="arrow" id="settingsArrow">&#9654;</span> Settings
-      </button>
-      <div class="settings-body" id="settingsBody">
-        <div class="settings-drop" id="dropZone">Drop folder here</div>
-        <div class="settings-row">
-          <input id="dlPath" type="text" placeholder="Download path...">
-          <button class="browse-btn" onclick="browsePath()">Browse</button>
-          <button onclick="savePath()">Apply</button>
-        </div>
-        <div class="settings-row" style="margin-top:8px">
-          <input id="proxyUrl" type="text" placeholder="Proxy URL (e.g. http://127.0.0.1:7897)">
-          <button class="browse-btn" onclick="autoDetectProxy()">Detect</button>
-          <button onclick="saveProxy()">Apply</button>
-        </div>
-        <div class="settings-row" style="margin-top:8px">
-          <select id="cookiesBrowser" style="flex:1; padding:8px 10px; background:var(--bg); color:var(--fg); border:1px solid #333; border-radius:6px; font-size:0.9rem;">
-            <option value="">No cookies (default)</option>
-            <option value="chrome">Chrome</option>
-            <option value="firefox">Firefox</option>
-            <option value="edge">Edge</option>
-            <option value="brave">Brave</option>
-            <option value="opera">Opera</option>
-            <option value="vivaldi">Vivaldi</option>
-          </select>
-          <button onclick="saveCookies()">Apply</button>
-        </div>
-        <div class="settings-row" style="margin-top:8px">
-          <input id="cookiesFile" type="text" placeholder="cookies.txt path (optional, overrides browser cookies)">
-          <button class="browse-btn" onclick="browseCookieFile()">Browse</button>
-          <button onclick="saveCookieFile()">Apply</button>
-        </div>
-        <p class="hint" style="margin:6px 0 0;font-size:0.75rem;">For YouTube login-only videos, select a browser where you are logged into YouTube, or import a cookies.txt file. Safari is not supported by browser-cookie extraction on macOS.</p>
-        <div class="settings-msg" id="settingsMsg"></div>
+    <header class="app-header">
+      <div class="brand">
+        <h1>Media<em>Drop</em></h1>
+        <p>免费媒体下载器</p>
       </div>
-    </div>
+      <button class="settings-launcher" id="settingsLauncher" onclick="openSettings()" aria-label="设置" aria-haspopup="dialog" aria-controls="settingsDrawer">
+        <span class="gear" aria-hidden="true">&#9881;</span>
+        <span class="label">设置</span>
+      </button>
+    </header>
 
-    <textarea id="urls" placeholder="Paste one or more URLs..." rows="2"></textarea>
-    <p class="hint">Multiple links? Separate with spaces, commas, or newlines.</p>
-
-    <div class="controls">
-      <button class="fetch-btn" id="goBtn" onclick="go()">Fetch</button>
+    <div class="url-composer">
+      <textarea id="urls" placeholder="粘贴一个或多个媒体链接..." rows="2"></textarea>
+      <button class="fetch-btn" id="goBtn" onclick="go()">解析链接</button>
     </div>
+    <p class="hint">多个链接可使用空格、逗号或换行分隔。</p>
 
     <div id="cards" class="cards"></div>
 
     <div class="footer">
       YouTube &middot; TikTok &middot; Instagram &middot; Twitter/X &middot; Reddit &middot; Facebook<br>
       Vimeo &middot; Twitch &middot; Dailymotion &middot; SoundCloud &middot; Loom &middot; Streamable<br>
-      Pinterest &middot; Tumblr &middot; Threads &middot; LinkedIn &middot; 1000+ more
+      Pinterest &middot; Tumblr &middot; Threads &middot; LinkedIn &middot; 另支持 1000+ 网站
     </div>
   </div>
+
+  <div class="settings-backdrop" id="settingsBackdrop" onclick="closeSettings()"></div>
+  <aside class="settings-drawer" id="settingsDrawer" role="dialog" aria-modal="true" aria-labelledby="settingsTitle" aria-hidden="true">
+    <div class="drawer-header">
+      <h2 id="settingsTitle">设置</h2>
+      <button class="icon-btn" onclick="closeSettings()" title="关闭设置" aria-label="关闭设置">&times;</button>
+    </div>
+    <div class="drawer-content">
+      <section class="settings-section">
+        <h3>下载位置</h3>
+        <label class="field settings-drop" id="dropZone">
+          <span class="field-label">保存文件夹</span>
+          <span class="field-control">
+            <input id="dlPath" type="text" placeholder="选择下载文件夹" onblur="savePath()">
+            <button class="secondary-btn" type="button" onclick="browsePath()">选择</button>
+          </span>
+          <span class="field-help">可以选择或粘贴路径，也可以把文件夹拖放到此处。</span>
+        </label>
+      </section>
+
+      <section class="settings-section">
+        <h3>网络</h3>
+        <label class="field">
+          <span class="field-label">代理地址</span>
+          <span class="field-control">
+            <input id="proxyUrl" type="text" placeholder="不使用代理" onblur="saveProxy()">
+            <button class="secondary-btn" type="button" onclick="autoDetectProxy()">自动检测</button>
+          </span>
+          <span class="field-help">留空时将直接连接网络。</span>
+        </label>
+      </section>
+
+      <section class="settings-section">
+        <h3>YouTube 登录</h3>
+        <label class="field">
+          <span class="field-label">认证方式</span>
+          <span class="field-control">
+            <select id="authMode" onchange="changeAuthMode()">
+              <option value="none">不使用 Cookie</option>
+              <option value="browser">使用浏览器 Cookie</option>
+              <option value="file">使用 cookies.txt</option>
+            </select>
+          </span>
+        </label>
+        <label class="field conditional-field" id="browserCookieField" hidden>
+          <span class="field-label">已登录的浏览器</span>
+          <span class="field-control">
+            <select id="cookiesBrowser" onchange="saveCookies()">
+              <option value="chrome">Chrome</option>
+              <option value="firefox">Firefox</option>
+              <option value="edge">Edge</option>
+              <option value="brave">Brave</option>
+              <option value="opera">Opera</option>
+              <option value="vivaldi">Vivaldi</option>
+            </select>
+          </span>
+          <span class="field-help">macOS 暂不支持从 Safari 提取 Cookie。</span>
+        </label>
+        <label class="field conditional-field" id="cookieFileField" hidden>
+          <span class="field-label">Cookie 文件</span>
+          <span class="field-control">
+            <input id="cookiesFile" type="text" placeholder="选择 cookies.txt" onblur="saveCookieFile()">
+            <button class="secondary-btn" type="button" onclick="browseCookieFile()">选择</button>
+          </span>
+        </label>
+        <div class="tool-actions" style="margin-top:14px">
+          <button class="secondary-btn" type="button" onclick="testCookies()">测试登录状态</button>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3>维护工具</h3>
+        <div class="status-line">
+          <span>yt-dlp</span>
+          <strong id="ytdlpVersion">尚未检查</strong>
+        </div>
+        <div class="tool-actions">
+          <button class="secondary-btn" type="button" onclick="checkYtdlp()">检查更新</button>
+          <button class="primary-btn" id="updateYtdlpBtn" type="button" onclick="updateYtdlp()" hidden>更新 yt-dlp</button>
+        </div>
+      </section>
+    </div>
+    <div class="settings-msg" id="settingsMsg" role="status" aria-live="polite"></div>
+  </aside>
 
   <script>
     let cardData = [];
 
     // Settings
-    function toggleSettings() {
-      const body = document.getElementById('settingsBody');
-      const arrow = document.getElementById('settingsArrow');
-      body.classList.toggle('open');
-      arrow.classList.toggle('open');
+    let settingsLoaded = false;
+    let settingsMessageTimer = null;
+
+    function openSettings() {
+      document.getElementById('settingsDrawer').classList.add('open');
+      document.getElementById('settingsBackdrop').classList.add('open');
+      document.getElementById('settingsDrawer').setAttribute('aria-hidden', 'false');
+      document.body.classList.add('drawer-open');
+      if (!settingsLoaded) loadSettings();
+      setTimeout(() => document.querySelector('#settingsDrawer .icon-btn').focus(), 50);
+    }
+
+    function closeSettings() {
+      document.getElementById('settingsDrawer').classList.remove('open');
+      document.getElementById('settingsBackdrop').classList.remove('open');
+      document.getElementById('settingsDrawer').setAttribute('aria-hidden', 'true');
+      document.body.classList.remove('drawer-open');
+      document.getElementById('settingsLauncher').focus();
+    }
+
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && document.getElementById('settingsDrawer').classList.contains('open')) {
+        closeSettings();
+      }
+    });
+
+    function updateAuthFields() {
+      const mode = document.getElementById('authMode').value;
+      document.getElementById('browserCookieField').hidden = mode !== 'browser';
+      document.getElementById('cookieFileField').hidden = mode !== 'file';
     }
 
     async function loadSettings() {
@@ -606,149 +765,167 @@
         const data = await res.json();
         document.getElementById('dlPath').value = data.download_dir || '';
         document.getElementById('proxyUrl').value = data.proxy_url || '';
-        document.getElementById('cookiesBrowser').value = data.cookies_browser || '';
+        document.getElementById('cookiesBrowser').value = data.cookies_browser || 'chrome';
         document.getElementById('cookiesFile').value = data.cookies_file || '';
-      } catch {}
+        document.getElementById('authMode').value = data.cookies_file ? 'file' : data.cookies_browser ? 'browser' : 'none';
+        updateAuthFields();
+        settingsLoaded = true;
+      } catch (err) {
+        setSettingsMsg('err', `无法加载设置：${friendlyError(err.message)}`);
+      }
+    }
+
+    async function postConfig(updates, successText) {
+      try {
+        const res = await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(updates),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'Could not save settings');
+        setSettingsMsg('ok', successText || '已自动保存', true);
+        return data;
+      } catch (err) {
+        setSettingsMsg('err', friendlyError(err.message));
+        return null;
+      }
     }
 
     async function savePath() {
       const input = document.getElementById('dlPath');
-      const msg = document.getElementById('settingsMsg');
-      try {
-        const res = await fetch('/api/config', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ download_dir: input.value }),
-        });
-        const data = await res.json();
-        if (data.error) {
-          msg.className = 'settings-msg err';
-          msg.textContent = data.error;
-        } else {
-          msg.className = 'settings-msg ok';
-          msg.textContent = 'Path updated';
-          input.value = data.download_dir;
-          setTimeout(() => { msg.textContent = ''; }, 2000);
-        }
-      } catch (err) {
-        msg.className = 'settings-msg err';
-        msg.textContent = err.message;
-      }
+      const data = await postConfig({ download_dir: input.value }, '下载文件夹已保存');
+      if (data) input.value = data.download_dir || '';
     }
 
     async function saveProxy() {
       const input = document.getElementById('proxyUrl');
-      const msg = document.getElementById('settingsMsg');
-      try {
-        const res = await fetch('/api/config', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ proxy_url: input.value }),
-        });
-        const data = await res.json();
-        if (data.error) {
-          msg.className = 'settings-msg err';
-          msg.textContent = data.error;
-        } else {
-          msg.className = 'settings-msg ok';
-          msg.textContent = 'Proxy updated';
-          input.value = data.proxy_url || '';
-          setTimeout(() => { msg.textContent = ''; }, 2000);
-        }
-      } catch (err) {
-        msg.className = 'settings-msg err';
-        msg.textContent = err.message;
+      const data = await postConfig({ proxy_url: input.value }, input.value ? '代理设置已保存' : '已切换为直接连接');
+      if (data) input.value = data.proxy_url || '';
+    }
+
+    async function changeAuthMode() {
+      const mode = document.getElementById('authMode').value;
+      updateAuthFields();
+      if (mode === 'none') {
+        await postConfig({ cookies_browser: '', cookies_file: '' }, '已停用 YouTube Cookie');
+      } else if (mode === 'browser') {
+        await postConfig({ cookies_browser: document.getElementById('cookiesBrowser').value || 'chrome', cookies_file: '' }, '已启用浏览器 Cookie');
+      } else {
+        await postConfig({ cookies_browser: '' }, '已启用 cookies.txt 认证');
       }
     }
 
     async function saveCookies() {
-      const select = document.getElementById('cookiesBrowser');
-      const msg = document.getElementById('settingsMsg');
-      try {
-        const res = await fetch('/api/config', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cookies_browser: select.value }),
-        });
-        const data = await res.json();
-        if (data.error) {
-          msg.className = 'settings-msg err';
-          msg.textContent = data.error;
-        } else {
-          msg.className = 'settings-msg ok';
-          msg.textContent = select.value ? `Cookies: ${select.value}` : 'Cookies disabled';
-          setTimeout(() => { msg.textContent = ''; }, 2000);
-        }
-      } catch (err) {
-        msg.className = 'settings-msg err';
-        msg.textContent = err.message;
-      }
+      const browser = document.getElementById('cookiesBrowser').value;
+      await postConfig({ cookies_browser: browser, cookies_file: '' }, `已选择 ${browser} Cookie`);
     }
 
     async function saveCookieFile() {
       const input = document.getElementById('cookiesFile');
-      const msg = document.getElementById('settingsMsg');
-      try {
-        const res = await fetch('/api/config', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cookies_file: input.value }),
-        });
-        const data = await res.json();
-        if (data.error) {
-          msg.className = 'settings-msg err';
-          msg.textContent = data.error;
-        } else {
-          msg.className = 'settings-msg ok';
-          msg.textContent = data.cookies_file ? 'Cookie file updated' : 'Cookie file cleared';
-          input.value = data.cookies_file || '';
-          setTimeout(() => { msg.textContent = ''; }, 2000);
-        }
-      } catch (err) {
-        msg.className = 'settings-msg err';
-        msg.textContent = err.message;
-      }
+      const data = await postConfig({ cookies_file: input.value, cookies_browser: '' }, input.value ? 'Cookie 文件已保存' : 'Cookie 文件已清除');
+      if (data) input.value = data.cookies_file || '';
     }
 
     async function autoDetectProxy() {
       const input = document.getElementById('proxyUrl');
-      const msg = document.getElementById('settingsMsg');
-      if (window.electronAPI && window.electronAPI.detectProxy) {
-        const proxy = await window.electronAPI.detectProxy();
-        if (proxy) {
-          input.value = proxy;
-          saveProxy();
-        } else {
-          msg.className = 'settings-msg err';
-          msg.textContent = 'No proxy detected';
-          setTimeout(() => { msg.textContent = ''; }, 2000);
-        }
-      } else {
-        msg.className = 'settings-msg err';
-        msg.textContent = 'Auto-detect requires desktop app';
-        setTimeout(() => { msg.textContent = ''; }, 2000);
+      if (!window.electronAPI || !window.electronAPI.detectProxy) {
+        setSettingsMsg('err', '自动检测代理仅可在桌面应用中使用');
+        return;
+      }
+      const proxy = await window.electronAPI.detectProxy();
+      if (!proxy) {
+        setSettingsMsg('err', '未检测到可用代理', true);
+        return;
+      }
+      input.value = proxy;
+      await saveProxy();
+    }
+
+    async function browsePath() {
+      if (!window.electronAPI || !window.electronAPI.selectFolder) {
+        setSettingsMsg('err', '选择文件夹仅可在桌面应用中使用');
+        return;
+      }
+      const folder = await window.electronAPI.selectFolder();
+      if (folder) {
+        document.getElementById('dlPath').value = folder;
+        await savePath();
       }
     }
 
     async function browseCookieFile() {
-      if (window.electronAPI && window.electronAPI.selectCookieFile) {
-        const file = await window.electronAPI.selectCookieFile();
-        if (file) {
-          document.getElementById('cookiesFile').value = file;
-          saveCookieFile();
-        }
+      if (!window.electronAPI || !window.electronAPI.selectCookieFile) {
+        setSettingsMsg('err', '选择文件仅可在桌面应用中使用');
+        return;
+      }
+      const file = await window.electronAPI.selectCookieFile();
+      if (file) {
+        document.getElementById('cookiesFile').value = file;
+        await saveCookieFile();
       }
     }
 
-    loadSettings();
+    function setSettingsMsg(kind, message, autoClear = false) {
+      const msg = document.getElementById('settingsMsg');
+      clearTimeout(settingsMessageTimer);
+      msg.className = `settings-msg ${kind}`;
+      msg.textContent = message;
+      if (autoClear) settingsMessageTimer = setTimeout(() => { msg.textContent = ''; }, 2400);
+    }
 
-    async function browsePath() {
-      if (window.electronAPI && window.electronAPI.selectFolder) {
-        const folder = await window.electronAPI.selectFolder();
-        if (folder) {
-          document.getElementById('dlPath').value = folder;
-          savePath();
+    async function testCookies() {
+      setSettingsMsg('', '正在测试 YouTube 登录状态...');
+      try {
+        const firstUrl = parseUrls(document.getElementById('urls').value)[0] || '';
+        const res = await fetch('/api/test-cookies', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: firstUrl }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          setSettingsMsg('err', friendlyError(data.error || 'Cookie test failed'));
+        } else {
+          const source = data.using_cookies ? '已配置 Cookie' : '未使用 Cookie';
+          setSettingsMsg('ok', `YouTube 登录状态正常（${source}）`);
         }
+      } catch (err) {
+        setSettingsMsg('err', friendlyError(err.message));
+      }
+    }
+
+    async function checkYtdlp() {
+      const version = document.getElementById('ytdlpVersion');
+      const updateButton = document.getElementById('updateYtdlpBtn');
+      version.textContent = '正在检查...';
+      setSettingsMsg('', '正在检查 yt-dlp 更新...');
+      try {
+        const res = await fetch('/api/ytdlp/version');
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'Could not check yt-dlp');
+        version.textContent = data.current || '未知版本';
+        updateButton.hidden = !data.update_available;
+        const status = data.update_available ? `发现新版本 ${data.latest || ''}` : 'yt-dlp 已是最新版本';
+        setSettingsMsg(data.update_available ? '' : 'ok', status);
+      } catch (err) {
+        version.textContent = '检查失败';
+        setSettingsMsg('err', friendlyError(err.message));
+      }
+    }
+
+    async function updateYtdlp() {
+      setSettingsMsg('', '正在更新 yt-dlp...');
+      try {
+        const res = await fetch('/api/ytdlp/update', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'yt-dlp update failed');
+        const current = data.version || data.latest || '最新版本';
+        document.getElementById('ytdlpVersion').textContent = current;
+        document.getElementById('updateYtdlpBtn').hidden = true;
+        setSettingsMsg('ok', `yt-dlp 已更新至 ${current}`);
+      } catch (err) {
+        setSettingsMsg('err', friendlyError(err.message));
       }
     }
 
@@ -807,6 +984,27 @@
       return cardData[idx].format || 'video';
     }
 
+    function buildDownloadRequest(card, format = card.format || 'video') {
+      return {
+        format,
+        formatId: format === 'video' ? (card.selectedFormatId || null) : null,
+        videoRangeMode: format === 'video' ? (card.videoRangeMode || 'auto') : null,
+      };
+    }
+
+    function downloadRequestKey(request) {
+      return JSON.stringify([
+        request.format,
+        request.formatId || null,
+        request.formatId ? null : request.videoRangeMode || null,
+      ]);
+    }
+
+    function completedDownloadFor(card, format = card.format || 'video') {
+      const key = downloadRequestKey(buildDownloadRequest(card, format));
+      return card.completedDownloads?.[key] || null;
+    }
+
     function parseUrls(text) {
       return [...new Set(text.split(/[\s,]+/).map(u => u.trim()).filter(u => u.startsWith('http')))];
     }
@@ -825,18 +1023,42 @@
     }
 
     function friendlyError(err) {
-      if (err.includes('Unsupported URL')) return 'This URL is not supported';
-      if (err.includes('Video unavailable') || err.includes('not available')) return 'Video is unavailable or private';
-      if (err.includes('Private video')) return 'This video is private';
-      if (err.includes('HTTP Error 403')) return 'Access denied. Please try again later.';
-      if (err.includes('HTTP Error 404')) return 'Video not found';
-      if (err.includes('Sign in to confirm')) return 'YouTube requires authentication — select a logged-in browser or cookies.txt in Settings.';
-      if (err.includes('Operation not permitted') && err.includes('Safari')) return 'Safari is not supported. Open Chrome or Firefox, log into YouTube, then select that browser in Settings.';
-      if (err.includes('cookies')) return 'Cookie error — make sure your browser is logged into YouTube, or import a valid cookies.txt file.';
-      if (err.includes('copyright')) return 'Video blocked due to copyright';
-      if (err.includes('geo')) return 'Video not available in your region';
-      if (err.includes('timed out') || err.includes('Timed out')) return 'Request timed out — try again';
-      if (err.includes('network') || err.includes('Network')) return 'Network error — check your connection';
+      err = String(err || '未知错误');
+      if (err.includes('Unsupported URL')) return '暂不支持此链接';
+      if (err.includes('Video unavailable') || err.includes('not available')) return '视频不可用或属于私密内容';
+      if (err.includes('Private video')) return '这是一个私密视频';
+      if (err.includes('HTTP Error 403')) return '访问被拒绝，请稍后重试';
+      if (err.includes('HTTP Error 404')) return '未找到该视频';
+      if (err.includes('Sign in to confirm')) return 'YouTube 需要登录认证，请在设置中选择已登录的浏览器或 cookies.txt';
+      if (err.includes('Operation not permitted') && err.includes('Safari')) return '暂不支持 Safari，请登录 Chrome 或 Firefox 后在设置中选择对应浏览器';
+      if (err.toLowerCase().includes('cookies')) return 'Cookie 无效，请确认浏览器已登录 YouTube，或导入有效的 cookies.txt';
+      if (err.toLowerCase().includes('copyright')) return '视频因版权限制而无法下载';
+      if (err.toLowerCase().includes('geo')) return '当前地区无法播放此视频';
+      if (err.includes('timed out') || err.includes('Timed out')) return '请求超时，请重试';
+      if (err.includes('network') || err.includes('Network') || err.includes('Failed to fetch')) return '网络连接失败，请检查网络或代理设置';
+      if (err.includes('Could not load settings')) return '无法加载设置';
+      if (err.includes('Could not save settings')) return '无法保存设置';
+      if (err.includes('Cookie file does not exist')) return '所选 Cookie 文件不存在';
+      if (err.includes('Unsupported browser')) return '不支持所选浏览器';
+      if (err.includes('Download directory')) return '下载文件夹无效或无法访问';
+      if (err.includes('Cookie test failed')) return 'Cookie 测试失败';
+      if (err.includes('Could not check yt-dlp')) return '无法检查 yt-dlp 更新';
+      if (err.includes('Could not check latest yt-dlp release')) return '无法获取最新的 yt-dlp 版本信息';
+      if (err.includes('Could not download yt-dlp')) return '无法下载 yt-dlp 更新';
+      if (err.includes('yt-dlp update failed')) return 'yt-dlp 更新失败';
+      if (err.includes('Lost connection to server')) return '与下载服务的连接已中断';
+      if (err.includes('Connection lost')) return '连接已中断，请重试';
+      if (err.includes('No URL provided')) return '请先输入媒体链接';
+      if (err.includes('Invalid URL')) return '链接格式无效';
+      if (err.includes('Invalid video range mode')) return '动态范围选项无效';
+      if (err.includes('Job not found')) return '未找到下载任务';
+      if (err.includes('File not ready')) return '文件尚未准备完成';
+      if (err.includes('Access denied')) return '没有权限访问该文件';
+      if (err.includes('Process already finished')) return '下载任务已经结束';
+      if (err.includes('Timed out fetching video info')) return '解析媒体信息超时';
+      if (err.includes('Timed out testing cookies')) return '测试 Cookie 超时';
+      if (err.includes('Cannot create directory')) return '无法创建下载文件夹';
+      if (err.includes('Download failed')) return '下载失败，请重试';
       return err.length > 120 ? err.slice(0, 120) + '...' : err;
     }
 
@@ -851,7 +1073,7 @@
       const btn = document.getElementById('goBtn');
       const container = document.getElementById('cards');
       btn.disabled = true;
-      btn.textContent = 'Loading...';
+      btn.textContent = '正在解析...';
       container.innerHTML = '';
       cardData = [];
 
@@ -880,7 +1102,11 @@
               duration: data.duration,
               uploader: data.uploader || '',
               formats: data.formats || [],
-              selectedFormatId: data.formats?.[0]?.id || null,
+              defaultFormatIds: data.default_format_ids || {},
+              hasHdr: Boolean(data.has_hdr),
+              videoRangeMode: 'auto',
+              selectedFormatId: data.default_format_ids?.auto || data.formats?.[0]?.id || null,
+              completedDownloads: {},
             };
           }
         } catch (err) {
@@ -894,7 +1120,7 @@
       }
 
       btn.disabled = false;
-      btn.textContent = 'Fetch';
+      btn.textContent = '解析链接';
     }
 
     function renderCard(idx) {
@@ -930,7 +1156,7 @@
             </div>
           </div>
           <div class="card-body">
-            <div class="card-title" style="color:var(--error)">Could not fetch video</div>
+            <div class="card-title" style="color:var(--error)">无法解析媒体信息</div>
             <div class="card-error-msg">${esc(friendlyError(c.error || ''))}</div>
             <div class="card-error-url">${esc(c.url)}</div>
           </div>
@@ -962,11 +1188,23 @@
         <button class="fmt-pill${cardFmt === 'image' ? ' active' : ''}" data-format="image" onclick="setCardFormat(${idx}, 'image')">JPG</button>
       </div>`;
 
+      const rangeMode = c.videoRangeMode || 'auto';
+      const rangePills = `<div class="range-pills">
+        <button class="range-pill${rangeMode === 'auto' ? ' active' : ''}" onclick="setVideoRangeMode(${idx}, 'auto')">自动</button>
+        <button class="range-pill${rangeMode === 'hdr' ? ' active' : ''}" onclick="setVideoRangeMode(${idx}, 'hdr')"${c.hasHdr ? '' : ' disabled'}>仅 HDR</button>
+        <button class="range-pill${rangeMode === 'sdr' ? ' active' : ''}" onclick="setVideoRangeMode(${idx}, 'sdr')">仅 SDR</button>
+      </div>`;
+
       // Quality chips (only for video)
       let qualityChips = '';
       if (!isAudio && !isImage && c.formats && c.formats.length > 0) {
-        qualityChips = c.formats.map(f =>
-          `<button class="q-chip${f.id === c.selectedFormatId ? ' active' : ''}" onclick="pickFormat(${idx}, '${f.id}')">${f.label}</button>`
+        const visibleFormats = rangeMode === 'hdr'
+          ? c.formats.filter(f => f.hdr)
+          : rangeMode === 'sdr'
+            ? c.formats.filter(f => !f.hdr)
+            : c.formats;
+        qualityChips = visibleFormats.map(f =>
+          `<button class="q-chip${f.id === c.selectedFormatId ? ' active' : ''}" onclick="pickFormat(${idx}, '${f.id}')">${esc(f.label)}</button>`
         ).join('');
       }
 
@@ -975,8 +1213,15 @@
 
       if (c.status === 'ready') {
         actionHtml = `${fmtPills}
+          ${!isAudio && !isImage ? rangePills : ''}
           ${!isAudio && !isImage && qualityChips ? '<div class="quality-row">' + qualityChips + '</div>' : ''}
-          <button class="card-dl-btn" onclick="dlCard(${idx})">Download</button>`;
+          <button class="card-dl-btn" onclick="dlCard(${idx})">下载</button>`;
+      } else if (c.status === 'queued') {
+        progressHtml = `
+          <div class="dl-controls">
+            <span class="card-status downloading">等待下载</span>
+            <button class="card-dl-btn small cancel" onclick="cancelDl(${idx})">取消</button>
+          </div>`;
       } else if (c.status === 'downloading' || c.status === 'paused') {
         const p = c.progress || {};
         const pct = p.percent != null ? p.percent.toFixed(1) : '0';
@@ -986,41 +1231,47 @@
         const total = p.total ? fmtSize(p.total) : '';
         const isPaused = c.status === 'paused';
         const statusIcon = isPaused ? '⏸' : '<span class="spin"></span>';
-        const statusText = isPaused ? 'Paused' : (total ? downloaded + ' / ' + total : 'Downloading...');
+        const statusText = isPaused ? '已暂停' : (total ? downloaded + ' / ' + total : '正在下载...');
         progressHtml = `
           <div class="dl-progress">
             <div class="progress-bar-bg"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
-            <div class="progress-info"><span>${pct}%</span><span>${speed} &middot; ETA ${eta}</span></div>
+            <div class="progress-info"><span>${pct}%</span><span>${speed} &middot; 剩余 ${eta}</span></div>
           </div>
           <div class="dl-controls">
             <span class="card-status downloading">${statusIcon} ${statusText}</span>
-            <button class="card-dl-btn small" onclick="togglePause(${idx})">${isPaused ? 'Resume' : 'Pause'}</button>
-            <button class="card-dl-btn small cancel" onclick="cancelDl(${idx})">Cancel</button>
+            <button class="card-dl-btn small" onclick="togglePause(${idx})">${isPaused ? '继续' : '暂停'}</button>
+            <button class="card-dl-btn small cancel" onclick="cancelDl(${idx})">取消</button>
           </div>`;
       } else if (c.status === 'done') {
-        actionHtml = `<span class="card-status done">${esc(c.filename || '')}</span>
+        const completed = completedDownloadFor(c, cardFmt);
+        const completionStatus = completed
+          ? `<span class="card-status done">已保存：${esc(completed.filename || '')}</span>`
+          : '';
+        actionHtml = `${completionStatus}
           ${fmtPills}
+          ${!isAudio && !isImage ? rangePills : ''}
           ${!isAudio && !isImage && qualityChips ? '<div class="quality-row">' + qualityChips + '</div>' : ''}
           <div class="done-btns">
-            <button class="card-dl-btn done" onclick="saveCard(${idx})">Save</button>
-            <button class="card-dl-btn" onclick="dlCard(${idx})">Re-download</button>
+            <button class="card-dl-btn" onclick="dlCard(${idx})">${completed ? '重新下载' : '下载'}</button>
           </div>`;
       } else if (c.status === 'error') {
         actionHtml = `${fmtPills}
+          ${!isAudio && !isImage ? rangePills : ''}
           ${!isAudio && !isImage && qualityChips ? '<div class="quality-row">' + qualityChips + '</div>' : ''}
-          <button class="card-dl-btn" onclick="dlCard(${idx})">Retry</button>
+          <button class="card-dl-btn" onclick="dlCard(${idx})">重试</button>
           <span class="card-status error">${esc(friendlyError(c.error || 'Download failed'))}</span>`;
       } else if (c.status === 'cancelled') {
-        actionHtml = `<span class="card-status error">Cancelled</span>
+        actionHtml = `<span class="card-status error">已取消</span>
           ${fmtPills}
+          ${!isAudio && !isImage ? rangePills : ''}
           ${!isAudio && !isImage && qualityChips ? '<div class="quality-row">' + qualityChips + '</div>' : ''}
-          <button class="card-dl-btn" onclick="dlCard(${idx})">Download</button>`;
+          <button class="card-dl-btn" onclick="dlCard(${idx})">下载</button>`;
       }
 
       el.innerHTML = `
         <div class="card-thumb">${thumbHtml}</div>
         <div class="card-body">
-          <div class="card-title">${esc(c.title || 'Untitled')}</div>
+          <div class="card-title">${esc(c.title || '未命名媒体')}</div>
           <div class="card-meta">${esc(c.uploader)}${c.duration ? ' · ' + fmtDur(c.duration) : ''}</div>
           <div class="card-actions">${actionHtml}</div>
           ${progressHtml}
@@ -1075,7 +1326,7 @@
       const bar = document.createElement('div');
       bar.id = 'dl-all-bar';
       bar.className = 'dl-all-bar';
-      bar.innerHTML = `<button class="dl-all-btn" onclick="dlAll()">Download All</button>`;
+      bar.innerHTML = `<button class="dl-all-btn" onclick="dlAll()">全部下载</button>`;
       document.getElementById('cards').appendChild(bar);
     }
 
@@ -1084,9 +1335,20 @@
       renderCard(idx);
     }
 
+    function setVideoRangeMode(idx, mode) {
+      const c = cardData[idx];
+      c.videoRangeMode = mode;
+      const preferred = c.defaultFormatIds?.[mode];
+      if (preferred) {
+        c.selectedFormatId = preferred;
+      }
+      renderCard(idx);
+    }
+
     async function dlCard(idx) {
       const c = cardData[idx];
       const requestedFormat = currentCardFormat(idx);
+      c.activeRequest = buildDownloadRequest(c, requestedFormat);
       c.status = 'downloading';
       c.error = null;
       c.progress = {};
@@ -1099,8 +1361,9 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             url: c.url,
-            format: requestedFormat,
-            format_id: c.selectedFormatId,
+            format: c.activeRequest.format,
+            format_id: c.activeRequest.formatId,
+            video_range_mode: c.activeRequest.videoRangeMode || 'auto',
             title: c.title || '',
           }),
         });
@@ -1139,8 +1402,15 @@
           }
           if (data.status === 'done') {
             clearInterval(c._pollInterval);
+            const completedRequest = c.activeRequest || buildDownloadRequest(c);
+            c.completedDownloads = c.completedDownloads || {};
+            c.completedDownloads[downloadRequestKey(completedRequest)] = {
+              filename: data.filename,
+              request: completedRequest,
+            };
             c.status = 'done';
             c.filename = data.filename;
+            c.activeRequest = null;
             renderCard(idx);
           } else if (data.status === 'error') {
             clearInterval(c._pollInterval);
@@ -1155,6 +1425,9 @@
             // Keep polling but don't change status (user controls it)
             c.progress = data.progress;
             renderCard(idx);
+          } else if (data.status === 'queued' || data.status === 'starting') {
+            c.status = data.status === 'queued' ? 'queued' : 'downloading';
+            renderCard(idx);
           } else {
             c.status = 'downloading';
             renderCard(idx);
@@ -1168,18 +1441,9 @@
       }, 1000);
     }
 
-    function saveCard(idx) {
-      const c = cardData[idx];
-      if (!c.jobId) return;
-      const a = document.createElement('a');
-      a.href = `/api/file/${c.jobId}`;
-      a.download = c.filename || '';
-      a.click();
-    }
-
     async function dlAll() {
       const btn = document.querySelector('.dl-all-btn');
-      if (btn) { btn.disabled = true; btn.textContent = 'Downloading...'; }
+      if (btn) { btn.disabled = true; btn.textContent = '正在下载...'; }
 
       for (let i = 0; i < cardData.length; i++) {
         if (cardData[i].status === 'ready') {
@@ -1187,7 +1451,7 @@
         }
       }
 
-      if (btn) { btn.disabled = false; btn.textContent = 'Download All'; }
+      if (btn) { btn.disabled = false; btn.textContent = '全部下载'; }
     }
   </script>
 </body>

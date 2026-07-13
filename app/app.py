@@ -8,6 +8,12 @@ import signal
 import sys
 import atexit
 import socket
+import shutil
+import errno
+import tempfile
+import uuid
+import urllib.error
+import urllib.request
 
 from flask import Flask, request, jsonify, send_file, render_template
 
@@ -38,14 +44,47 @@ def get_resource_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
-def get_ytdlp_path():
-    """Return path to yt-dlp binary. Bundled in frozen mode, system PATH in dev."""
+def get_tools_dir():
+    d = os.path.join(get_base_dir(), "tools")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def get_ytdlp_asset_name():
+    if sys.platform == "win32":
+        return "yt-dlp.exe"
+    if sys.platform == "darwin":
+        return "yt-dlp_macos"
+    return "yt-dlp"
+
+
+def get_updatable_ytdlp_path():
+    name = "yt-dlp.exe" if sys.platform == "win32" else "yt-dlp"
+    candidate = os.path.join(get_tools_dir(), name)
+    if os.path.isfile(candidate):
+        return candidate
+    return None
+
+
+def get_bundled_ytdlp_path():
+    """Return bundled yt-dlp path if present."""
     if getattr(sys, "frozen", False):
         exe_dir = os.path.dirname(sys.executable)
         name = "yt-dlp.exe" if sys.platform == "win32" else "yt-dlp"
         candidate = os.path.join(exe_dir, name)
         if os.path.exists(candidate):
             return candidate
+    return None
+
+
+def get_ytdlp_path():
+    """Return preferred yt-dlp path: user-updated, bundled, then system PATH."""
+    updated = get_updatable_ytdlp_path()
+    if updated:
+        return updated
+    bundled = get_bundled_ytdlp_path()
+    if bundled:
+        return bundled
     return "yt-dlp"
 
 
@@ -74,15 +113,25 @@ def handle_broken_pipe(e):
     return jsonify({"error": "Connection lost. Please try again."}), 400
 
 CONFIG_FILE = os.path.join(get_base_dir(), "config.json")
+MAX_CONCURRENT_DOWNLOADS = 2
 
 # In-memory job tracker. Each entry: { status, proc, progress, file, filename, ... }
 # Not persisted — jobs are lost on restart, which is acceptable for a desktop app.
 jobs = {}
+download_queue = []
+active_downloads = set()
+queue_lock = threading.Lock()
+filename_lock = threading.Lock()
+CACHE_DIR_NAME = ".mediadrop-cache"
+shutdown_event = threading.Event()
 
 
 def cleanup_all_jobs():
-    """Kill all running yt-dlp processes on app exit."""
+    """Kill running downloads and remove their isolated cache files."""
+    shutdown_event.set()
     for job_id, job in list(jobs.items()):
+        if job.get("status") not in ("done", "error", "cancelled"):
+            job["status"] = "cancelled"
         proc = job.get("proc")
         if proc and proc.poll() is None:
             try:
@@ -90,7 +139,12 @@ def cleanup_all_jobs():
                 proc.wait(timeout=3)
             except Exception:
                 pass
-    print("[cleanup] All subprocesses killed", file=sys.stderr, flush=True)
+    for job in list(jobs.values()):
+        thread = job.get("thread")
+        if thread and thread is not threading.current_thread() and thread.is_alive():
+            thread.join(timeout=3)
+    cleanup_cache_root()
+    print("[cleanup] Download processes and cache cleared", file=sys.stderr, flush=True)
 
 
 atexit.register(cleanup_all_jobs)
@@ -268,6 +322,181 @@ def sanitize_filename(title, ext):
     return f"{safe}{ext}" if safe else None
 
 
+def get_cache_root():
+    """Return the only directory MediaDrop is allowed to delete recursively."""
+    base = os.path.realpath(get_base_dir())
+    cache_path = os.path.join(base, CACHE_DIR_NAME)
+    if os.path.islink(cache_path):
+        raise RuntimeError("MediaDrop cache root cannot be a symbolic link")
+    os.makedirs(cache_path, exist_ok=True)
+    if os.path.islink(cache_path):
+        raise RuntimeError("MediaDrop cache root changed during initialization")
+    root = os.path.realpath(cache_path)
+    if os.path.commonpath([root, base]) != base or root == base:
+        raise RuntimeError("MediaDrop cache root escaped the application data directory")
+    return root
+
+
+def _is_within(path, root):
+    """Check path containment after resolving symlinks and traversal."""
+    try:
+        real_root = os.path.realpath(root)
+        return os.path.commonpath([os.path.realpath(path), real_root]) == real_root
+    except (OSError, ValueError):
+        return False
+
+
+def get_job_cache_dir(job_id):
+    """Create an isolated cache directory for one download task."""
+    safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(job_id))[:160]
+    if not safe_id or safe_id in (".", ".."):
+        raise ValueError("Invalid cache job ID")
+    root = get_cache_root()
+    job_dir = os.path.join(root, safe_id)
+    if not _is_within(job_dir, root) or os.path.realpath(job_dir) == root:
+        raise ValueError("Cache path escaped its root")
+    os.makedirs(job_dir, exist_ok=True)
+    return job_dir
+
+
+def cleanup_job_cache(job_dir):
+    """Delete one task cache without ever following a path outside the cache root."""
+    try:
+        root = get_cache_root()
+    except (OSError, RuntimeError) as exc:
+        print(f"[cleanup] Refusing unsafe cache root: {exc}", file=sys.stderr, flush=True)
+        return False
+    if not job_dir or os.path.realpath(job_dir) == root or not _is_within(job_dir, root):
+        return False
+    try:
+        shutil.rmtree(job_dir)
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        print(f"[cleanup] Could not remove cache {job_dir}: {exc}", file=sys.stderr, flush=True)
+        return False
+
+
+def cleanup_cache_root():
+    """Remove orphaned cache entries; callers stop active jobs first."""
+    try:
+        root = get_cache_root()
+    except (OSError, RuntimeError) as exc:
+        print(f"[cleanup] Refusing unsafe cache root: {exc}", file=sys.stderr, flush=True)
+        return
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                os.unlink(entry.path)
+            else:
+                cleanup_job_cache(entry.path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(f"[cleanup] Could not remove orphan {entry.path}: {exc}", file=sys.stderr, flush=True)
+
+
+def cleanup_destination_temp_files(download_dir):
+    """Remove only MediaDrop-owned publish temp files left by a hard crash."""
+    try:
+        entries = list(os.scandir(download_dir))
+    except OSError:
+        return
+    for entry in entries:
+        if not (entry.name.startswith(".mediadrop-") and entry.name.endswith(".tmp")):
+            continue
+        try:
+            if entry.is_symlink() or entry.is_file(follow_symlinks=False):
+                os.unlink(entry.path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(f"[cleanup] Could not remove publish temp {entry.path}: {exc}", file=sys.stderr, flush=True)
+
+
+def _unique_candidate(directory, base_name, ext, counter):
+    filename = f"{base_name}{ext}" if counter == 0 else f"{base_name} ({counter}){ext}"
+    return os.path.join(directory, filename), filename
+
+
+def _link_without_overwrite(source, directory, base_name, ext):
+    """Atomically expose source under a unique user-facing filename."""
+    counter = 0
+    while True:
+        candidate, filename = _unique_candidate(directory, base_name, ext, counter)
+        try:
+            os.link(source, candidate)
+            return candidate, filename
+        except FileExistsError:
+            counter += 1
+
+
+def finalize_cached_file(source, download_dir, title, ext, job_id):
+    """Commit a completed cache file without exposing a partial destination file."""
+    cache_root = get_cache_root()
+    source = os.path.realpath(source)
+    if not _is_within(source, cache_root) or not os.path.isfile(source):
+        raise ValueError("Completed file is outside the MediaDrop cache")
+
+    os.makedirs(download_dir, exist_ok=True)
+    base_name = sanitize_filename(title, "") or str(job_id)
+
+    # Hard links are atomic, cannot overwrite existing files, and avoid copying
+    # when app data and the download folder share a filesystem.
+    try:
+        with filename_lock:
+            final_path, friendly_name = _link_without_overwrite(source, download_dir, base_name, ext)
+    except OSError as exc:
+        if exc.errno not in (errno.EXDEV, errno.EPERM, errno.EACCES, errno.ENOTSUP):
+            raise
+    else:
+        try:
+            os.unlink(source)
+        except OSError:
+            pass
+        return final_path, friendly_name
+
+    # Cross-filesystem fallback: copy to a hidden destination-side temp file,
+    # flush it, then publish it atomically.
+    safe_job_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(job_id))[:48]
+    fd, temp_path = tempfile.mkstemp(prefix=f".mediadrop-{safe_job_id}-", suffix=".tmp", dir=download_dir)
+    try:
+        with os.fdopen(fd, "wb") as target, open(source, "rb") as cached:
+            shutil.copyfileobj(cached, target, length=1024 * 1024)
+            target.flush()
+            os.fsync(target.fileno())
+        try:
+            with filename_lock:
+                final_path, friendly_name = _link_without_overwrite(temp_path, download_dir, base_name, ext)
+        except OSError as exc:
+            if exc.errno not in (errno.EPERM, errno.EACCES, errno.ENOTSUP):
+                raise
+            # Filesystems without hard-link support fall back to an atomic replace
+            # while holding the process-wide filename lock.
+            with filename_lock:
+                final_path, friendly_name = make_unique_filename(download_dir, base_name, ext)
+                if os.path.exists(final_path):
+                    raise FileExistsError(final_path)
+                os.replace(temp_path, final_path)
+                temp_path = None
+        try:
+            os.unlink(source)
+        except OSError:
+            pass
+        return final_path, friendly_name
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+
+
 def is_valid_url(url):
     """Basic URL validation."""
     return bool(re.match(r'^https?://', url))
@@ -288,10 +517,124 @@ def get_ytdlp_env():
     return env
 
 
-def run_download(job_id, url, format_choice, format_id, title):
+def run_ytdlp_version(path):
+    try:
+        result = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=20, env=get_ytdlp_env())
+        if result.returncode == 0:
+            return result.stdout.strip()
+        return None
+    except Exception:
+        return None
+
+
+def get_latest_ytdlp_release():
+    req = urllib.request.Request(
+        "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "MediaDrop"},
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return {
+        "version": data.get("tag_name", ""),
+        "name": data.get("name", ""),
+        "url": data.get("html_url", ""),
+        "published_at": data.get("published_at", ""),
+    }
+
+
+def compare_version_strings(a, b):
+    def parts(v):
+        return [int(x) for x in re.findall(r"\d+", v or "")]
+    aa, bb = parts(a), parts(b)
+    n = max(len(aa), len(bb))
+    aa += [0] * (n - len(aa))
+    bb += [0] * (n - len(bb))
+    return (aa > bb) - (aa < bb)
+
+
+def get_ytdlp_versions():
+    current_path = get_ytdlp_path()
+    current = run_ytdlp_version(current_path)
+    bundled = run_ytdlp_version(get_bundled_ytdlp_path()) if get_bundled_ytdlp_path() else None
+    updated = run_ytdlp_version(get_updatable_ytdlp_path()) if get_updatable_ytdlp_path() else None
+    latest = get_latest_ytdlp_release()
+    latest_version = latest.get("version", "")
+    return {
+        "current": current,
+        "latest": latest_version,
+        "bundled": bundled,
+        "updated": updated,
+        "using_updated": bool(get_updatable_ytdlp_path()),
+        "update_available": bool(current and latest_version and compare_version_strings(latest_version, current) > 0),
+        "release_url": latest.get("url", ""),
+        "published_at": latest.get("published_at", ""),
+        "path": current_path,
+    }
+
+
+def download_latest_ytdlp():
+    latest = get_latest_ytdlp_release()
+    asset_name = get_ytdlp_asset_name()
+    url = f"https://github.com/yt-dlp/yt-dlp/releases/latest/download/{asset_name}"
+    final_name = "yt-dlp.exe" if sys.platform == "win32" else "yt-dlp"
+    tools_dir = get_tools_dir()
+    tmp_path = os.path.join(tools_dir, f"{final_name}.download")
+    final_path = os.path.join(tools_dir, final_name)
+    with urllib.request.urlopen(url, timeout=120) as resp, open(tmp_path, "wb") as f:
+        shutil.copyfileobj(resp, f)
+    if sys.platform != "win32":
+        os.chmod(tmp_path, 0o755)
+    os.replace(tmp_path, final_path)
+    version = run_ytdlp_version(final_path)
+    return {
+        "version": version,
+        "latest": latest.get("version", ""),
+        "path": final_path,
+        "release_url": latest.get("url", ""),
+    }
+
+
+def process_download_queue():
+    with queue_lock:
+        if shutdown_event.is_set():
+            return
+        while download_queue and len(active_downloads) < MAX_CONCURRENT_DOWNLOADS:
+            job_id = download_queue.pop(0)
+            job = jobs.get(job_id)
+            if not job or job.get("status") != "queued":
+                continue
+            active_downloads.add(job_id)
+            job["status"] = "starting"
+            thread = threading.Thread(
+                target=run_download,
+                args=(
+                    job_id,
+                    job["url"],
+                    job["format"],
+                    job.get("format_id"),
+                    job.get("title", ""),
+                    job.get("video_range_mode", "auto"),
+                ),
+            )
+            thread.daemon = True
+            job["thread"] = thread
+            thread.start()
+
+
+def run_download(job_id, url, format_choice, format_id, title, video_range_mode="auto"):
     job = jobs[job_id]
     download_dir = get_download_dir()
-    out_template = os.path.join(download_dir, f"{job_id}.%(ext)s")
+    try:
+        job_cache_dir = get_job_cache_dir(job_id)
+    except Exception as exc:
+        job["status"] = "error"
+        job["error"] = f"Could not create download cache: {exc}"
+        with queue_lock:
+            active_downloads.discard(job_id)
+        process_download_queue()
+        return
+    job["cache_dir"] = job_cache_dir
+    out_template = os.path.join(job_cache_dir, f"{job_id}.%(ext)s")
 
     cmd = [get_ytdlp_path(), "--no-playlist", "--newline", "--progress", "-c", "-o", out_template]
 
@@ -319,9 +662,14 @@ def run_download(job_id, url, format_choice, format_id, title):
         ext = ".mp4"
         cmd += ["-f", f"{format_id}+bestaudio/best", "--merge-output-format", "mp4"]
     else:
-        # Default: best available quality
         ext = ".mp4"
-        cmd += ["-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4"]
+        if video_range_mode == "hdr":
+            selector = "bestvideo[dynamic_range!=SDR]+bestaudio/bestvideo+bestaudio/best"
+        elif video_range_mode == "sdr":
+            selector = "bestvideo[dynamic_range=SDR]+bestaudio/bestvideo+bestaudio/best"
+        else:
+            selector = "bestvideo+bestaudio/best"
+        cmd += ["-f", selector, "--merge-output-format", "mp4"]
 
     cmd.append(url)
 
@@ -367,7 +715,7 @@ def run_download(job_id, url, format_choice, format_id, title):
             return
 
         # Find downloaded file(s) — yt-dlp may produce extra files (.part, .ytdl, etc.)
-        pattern = os.path.join(download_dir, f"{job_id}.*")
+        pattern = os.path.join(job_cache_dir, f"{job_id}.*")
         files = glob.glob(pattern)
         if not files:
             job["status"] = "error"
@@ -375,30 +723,17 @@ def run_download(job_id, url, format_choice, format_id, title):
             return
 
         # Pick the actual output file by extension
-        if format_choice == "audio":
-            chosen = next((f for f in files if f.endswith(".mp3")), files[0])
-        elif format_choice == "image":
-            chosen = next((f for f in files if f.endswith(".jpg")), files[0])
-        else:
-            chosen = next((f for f in files if f.endswith(".mp4")), files[0])
+        chosen = next((f for f in files if f.lower().endswith(ext)), None)
+        if not chosen:
+            job["status"] = "error"
+            job["error"] = f"Download completed without the expected {ext} file"
+            return
 
-        # Clean up any extra files (thumbnails, temp files, etc.)
-        for f in files:
-            if f != chosen:
-                try:
-                    os.remove(f)
-                except OSError:
-                    pass
-
-        # Rename from job_id to human-readable title with counter for duplicates
-        base_name = sanitize_filename(title, "") or job_id
-        new_path, friendly_name = make_unique_filename(download_dir, base_name, ext)
-        try:
-            os.rename(chosen, new_path)
-            chosen = new_path
-        except OSError:
-            # If rename fails, keep the job_id filename
-            friendly_name = os.path.basename(chosen)
+        # Publish only the fully completed media file. Partials and intermediate
+        # streams remain isolated in the task cache and are removed in finally.
+        chosen, friendly_name = finalize_cached_file(
+            chosen, download_dir, title, ext, job_id
+        )
 
         job["status"] = "done"
         job["file"] = chosen
@@ -410,6 +745,12 @@ def run_download(job_id, url, format_choice, format_id, title):
         if job.get("status") != "cancelled":
             job["status"] = "error"
             job["error"] = str(e)
+    finally:
+        cleanup_job_cache(job_cache_dir)
+        with queue_lock:
+            active_downloads.discard(job_id)
+        if not shutdown_event.is_set():
+            process_download_queue()
 
 
 @app.route("/")
@@ -422,6 +763,35 @@ def index():
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
     return response
+
+
+def describe_dynamic_range(fmt):
+    dynamic_range = str(fmt.get("dynamic_range") or "").strip()
+    note = str(fmt.get("format_note") or "")
+    transfer = str(fmt.get("color_transfer") or "").lower()
+    combined = f"{dynamic_range} {note}".upper()
+
+    if "DOLBY VISION" in combined or re.search(r"\bDV\b", combined):
+        return True, "Dolby Vision"
+    if "HDR10+" in combined:
+        return True, "HDR10+"
+    if "HLG" in combined or "arib-std-b67" in transfer:
+        return True, "HLG"
+    if "HDR10" in combined or "PQ" in combined or "smpte2084" in transfer:
+        return True, "HDR10"
+    if dynamic_range and dynamic_range.upper() not in ("SDR", "UNKNOWN"):
+        return True, dynamic_range.upper()
+    if "HDR" in combined:
+        return True, "HDR"
+    return False, "SDR"
+
+
+def is_better_format(candidate, existing):
+    candidate_https = candidate.get("protocol", "") == "https"
+    existing_https = existing.get("protocol", "") == "https"
+    if candidate_https != existing_https:
+        return candidate_https
+    return (candidate.get("tbr") or 0) > (existing.get("tbr") or 0)
 
 
 @app.route("/api/info", methods=["POST"])
@@ -459,26 +829,37 @@ def get_info():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-    # Deduplicate formats by resolution — keep only the best stream per height.
-    # DASH (https) is preferred over HLS (m3u8) because it allows range requests
-    # and is significantly faster for seeking/resuming downloads.
-    best_by_height = {}
+    # Keep one best stream for each resolution and dynamic-range variant.
+    best_by_variant = {}
     for f in info.get("formats", []):
         height = f.get("height")
         vcodec = f.get("vcodec") or ""
         if height and vcodec and vcodec != "none":
-            proto = f.get("protocol", "")
-            tbr = f.get("tbr") or 0
-            existing = best_by_height.get(height)
-            if not existing:
-                best_by_height[height] = f
-            elif proto == "https" and existing.get("protocol", "") != "https":
-                best_by_height[height] = f
-            elif proto == existing.get("protocol", "") and tbr > (existing.get("tbr") or 0):
-                best_by_height[height] = f
+            is_hdr, range_label = describe_dynamic_range(f)
+            key = (height, range_label)
+            existing = best_by_variant.get(key)
+            if not existing or is_better_format(f, existing):
+                enriched = dict(f)
+                enriched["_is_hdr"] = is_hdr
+                enriched["_range_label"] = range_label
+                best_by_variant[key] = enriched
 
-    formats = [{"id": f["format_id"], "label": f"{h}p", "height": h} for h, f in best_by_height.items()]
-    formats.sort(key=lambda x: x["height"], reverse=True)
+    formats = []
+    for (height, _), f in best_by_variant.items():
+        formats.append({
+            "id": f["format_id"],
+            "label": f"{height}p {f['_range_label']}",
+            "height": height,
+            "hdr": f["_is_hdr"],
+            "dynamic_range": f["_range_label"],
+            "vcodec": f.get("vcodec", ""),
+            "ext": f.get("ext", ""),
+        })
+    formats.sort(key=lambda x: (x["height"], x["hdr"]), reverse=True)
+
+    auto_format = formats[0]["id"] if formats else None
+    hdr_format = next((f["id"] for f in formats if f["hdr"]), auto_format)
+    sdr_format = next((f["id"] for f in formats if not f["hdr"]), auto_format)
 
     return jsonify({
         "title": info.get("title", ""),
@@ -486,6 +867,8 @@ def get_info():
         "duration": info.get("duration"),
         "uploader": info.get("uploader", ""),
         "formats": formats,
+        "default_format_ids": {"auto": auto_format, "hdr": hdr_format, "sdr": sdr_format},
+        "has_hdr": any(f["hdr"] for f in formats),
     })
 
 
@@ -495,28 +878,34 @@ def start_download():
     url = data.get("url", "").strip()
     format_choice = data.get("format", "video")
     format_id = data.get("format_id")
+    video_range_mode = data.get("video_range_mode", "auto")
     title = data.get("title", "")
 
     if not url:
         return jsonify({"error": "No URL provided"}), 400
     if not is_valid_url(url):
         return jsonify({"error": "Invalid URL"}), 400
+    if video_range_mode not in ("auto", "hdr", "sdr"):
+        return jsonify({"error": "Invalid video range mode"}), 400
 
     import time
     cleanup_old_jobs()
     # Generate a readable-enough job ID from URL hash + timestamp
     url_hash = re.sub(r"[^a-zA-Z0-9]", "_", url)[-40:]
-    job_id = f"{url_hash}_{int(time.time()*1000)}"
+    job_id = f"{url_hash}_{time.time_ns()}_{uuid.uuid4().hex[:8]}"
     jobs[job_id] = {
-        "status": "starting",
+        "status": "queued",
         "url": url,
+        "format": format_choice,
+        "format_id": format_id,
+        "video_range_mode": video_range_mode,
         "title": title,
         "progress": {"percent": None, "speed": None, "eta": None, "downloaded": 0, "total": 0},
     }
 
-    thread = threading.Thread(target=run_download, args=(job_id, url, format_choice, format_id, title))
-    thread.daemon = True
-    thread.start()
+    with queue_lock:
+        download_queue.append(job_id)
+    process_download_queue()
 
     return jsonify({"job_id": job_id})
 
@@ -544,7 +933,7 @@ def download_file(job_id):
     # Path traversal guard: ensure resolved path stays within download directory
     real_path = os.path.realpath(file_path)
     download_dir = os.path.realpath(get_download_dir())
-    if not real_path.startswith(download_dir):
+    if not _is_within(real_path, download_dir):
         return jsonify({"error": "Access denied"}), 403
     return send_file(real_path, as_attachment=True, download_name=job.get("filename"))
 
@@ -580,8 +969,85 @@ def cancel_download(job_id):
     proc = job.get("proc")
     if proc and proc.poll() is None:
         proc.kill()
+    start_next = False
+    with queue_lock:
+        if job_id in download_queue:
+            download_queue.remove(job_id)
+            start_next = True
+        elif job_id not in active_downloads:
+            start_next = True
     job["status"] = "cancelled"
+    # Active tasks keep their concurrency slot until the worker observes the
+    # terminated process and runs its cache cleanup in finally.
+    if start_next:
+        process_download_queue()
     return jsonify({"status": "cancelled"})
+
+
+@app.route("/api/queue")
+def queue_state():
+    with queue_lock:
+        return jsonify({
+            "queued": list(download_queue),
+            "active": list(active_downloads),
+            "max_concurrent": MAX_CONCURRENT_DOWNLOADS,
+        })
+
+
+@app.route("/api/ytdlp/version")
+def ytdlp_version():
+    try:
+        return jsonify(get_ytdlp_versions())
+    except urllib.error.URLError as e:
+        return jsonify({"error": f"Could not check latest yt-dlp release: {e.reason}"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/ytdlp/update", methods=["POST"])
+def ytdlp_update():
+    try:
+        return jsonify(download_latest_ytdlp())
+    except urllib.error.URLError as e:
+        return jsonify({"error": f"Could not download yt-dlp: {e.reason}"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/test-cookies", methods=["POST"])
+def test_cookies():
+    data = request.json or {}
+    url = data.get("url", "").strip() or "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+    if not is_valid_url(url):
+        return jsonify({"error": "Invalid URL"}), 400
+
+    cmd = [get_ytdlp_path(), "--no-playlist", "--simulate", "--skip-download", "--dump-json", url]
+    proxy = get_proxy_url()
+    if proxy:
+        cmd += ["--proxy", proxy]
+    cookie_args = get_cookie_args()
+    cmd += cookie_args
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=get_ytdlp_env())
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "error": "Timed out testing cookies"}), 400
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+    if result.returncode != 0:
+        err = result.stderr.strip() or result.stdout.strip()
+        return jsonify({"ok": False, "error": err.split("\n")[-1], "using_cookies": bool(cookie_args)}), 400
+
+    try:
+        info = json.loads(result.stdout)
+    except Exception:
+        info = {}
+    return jsonify({
+        "ok": True,
+        "using_cookies": bool(cookie_args),
+        "title": info.get("title", ""),
+        "extractor": info.get("extractor", ""),
+    })
 
 
 VALID_BROWSERS = {"", "chrome", "firefox", "edge", "brave", "opera", "vivaldi"}
@@ -649,6 +1115,11 @@ signal.signal(signal.SIGINT, signal_handler)
 
 
 if __name__ == "__main__":
+    # Jobs are intentionally in-memory only, so every cache entry left from a
+    # previous process is orphaned and safe to remove before accepting requests.
+    cleanup_cache_root()
+    cleanup_destination_temp_files(get_download_dir())
+
     # First-run: import proxy from Electron's detectProxy() if config is empty.
     # This way users don't need to manually configure their proxy on first launch.
     env_proxy = os.environ.get("PROXY_URL", "")

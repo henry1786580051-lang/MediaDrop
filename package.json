@@ -1,13 +1,18 @@
 {
   "name": "mediadrop",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Self-hosted video and audio downloader",
   "author": "MediaDrop",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "test": "npm run test:frontend && npm run test:cache",
+    "test:frontend": "node scripts/test-format-state.js",
+    "test:cache": "python3 -B -m unittest discover -s app/tests -v",
+    "build:bin": "bash scripts/build-bin.sh",
+    "verify:bundle": "node scripts/verify-bundle.js",
     "dist": "electron-builder",
-    "dist:mac": "electron-builder --mac"
+    "dist:mac": "npm run build:bin && electron-builder --mac --arm64 -c.electronDist=node_modules/electron/dist && npm run verify:bundle"
   },
   "build": {
     "publish": null,
@@ -36,8 +41,16 @@
     "dmg": {
       "title": "MediaDrop",
       "contents": [
-        { "x": 130, "y": 220 },
-        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
       ]
     },
     "directories": {
@@ -49,6 +62,10 @@
       "app/**/*",
       "assets/**/*",
       "!app/downloads/**",
+      "!app/config.json",
+      "!app/.mediadrop-cache/**",
+      "!app/tools/**",
+      "!app/tests/**",
       "!downloads",
       "!venv",
       "!*.pyc",
@@ -62,6 +79,10 @@
           "**/*",
           "!venv/**",
           "!downloads/**",
+          "!config.json",
+          "!.mediadrop-cache/**",
+          "!tools/**",
+          "!tests/**",
           "!.git/**",
           "!__pycache__/**",
           "!app.py",
@@ -74,7 +95,9 @@
       {
         "from": "./bundled-bin/",
         "to": "bin",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ]
   },
