@@ -12,8 +12,12 @@ import shutil
 import errno
 import tempfile
 import uuid
+import math
+import statistics
+import time
 import urllib.error
 import urllib.request
+from collections import deque
 
 from flask import Flask, request, jsonify, send_file, render_template
 
@@ -286,19 +290,311 @@ def get_download_dir():
     return d
 
 
-def parse_progress(line):
-    """Extract download progress from a yt-dlp output line.
+PROGRESS_PREFIX = "__MEDIADROP_PROGRESS__"
+POSTPROCESS_PREFIX = "__MEDIADROP_POSTPROCESS__"
 
-    Expected format: " 45.2% of ~123.45MiB at 1.23MiB/s ETA 01:23"
-    Returns dict with percent, speed, eta or None if line doesn't match.
+
+def _positive_number(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return value if math.isfinite(value) and value > 0 else 0.0
+
+
+def _format_speed(bytes_per_second):
+    if not bytes_per_second or bytes_per_second <= 0:
+        return None
+    units = ("B/s", "KiB/s", "MiB/s", "GiB/s")
+    value = float(bytes_per_second)
+    unit = units[0]
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            break
+        value /= 1024
+    return f"{value:.1f}{unit}"
+
+
+def _format_eta(seconds):
+    if seconds is None:
+        return None
+    seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def empty_progress():
+    return {
+        "percent": None,
+        "speed": None,
+        "speed_bps": None,
+        "eta": None,
+        "eta_seconds": None,
+        "eta_confidence": "low",
+        "downloaded": 0,
+        "total": 0,
+        "total_is_estimate": False,
+        "phase": "downloading",
+        "phase_index": 1,
+        "state": "estimating",
+    }
+
+
+class DownloadProgressEstimator:
+    """Estimate throughput and ETA from monotonic byte samples.
+
+    yt-dlp's displayed ETA follows short-term throughput and is intentionally
+    reactive. MediaDrop uses longer, robust windows and an asymmetric EWMA so
+    brief bursts do not make the remaining time jump around.
     """
+
+    WINDOW_SECONDS = 30.0
+    WARMUP_SECONDS = 4.0
+    STALL_SECONDS = 8.0
+    MIN_SAMPLES = 4
+
+    def __init__(self, clock=None):
+        self.clock = clock or time.monotonic
+        self.lock = threading.RLock()
+        self.samples = deque()
+        self.rate_history = deque()
+        self.phase_started_at = None
+        self.last_sample_at = None
+        self.last_byte_at = None
+        self.last_phase_downloaded = 0
+        self.phase_total = 0
+        self.phase_total_is_estimate = False
+        self.total_estimates = deque(maxlen=9)
+        self.completed_downloaded = 0
+        self.completed_total = 0
+        self.completed_total_is_estimate = False
+        self.phase_index = 1
+        self.phase = "downloading"
+        self.smoothed_speed = None
+        self.last_speed_at = None
+        self.smoothed_eta = None
+        self.last_eta_at = None
+        self.paused = False
+
+    def _now(self, now):
+        return self.clock() if now is None else float(now)
+
+    def _begin_sampling_period(self, now, cumulative_downloaded):
+        self.samples.clear()
+        self.rate_history.clear()
+        self.samples.append((now, cumulative_downloaded))
+        self.phase_started_at = now
+        self.last_sample_at = now
+        self.last_byte_at = now
+        self.last_speed_at = now
+        self.smoothed_eta = None
+        self.last_eta_at = now
+
+    def _start_next_phase(self, now, downloaded):
+        self.completed_downloaded += self.last_phase_downloaded
+        self.completed_total += max(self.phase_total, self.last_phase_downloaded)
+        self.completed_total_is_estimate = (
+            self.completed_total_is_estimate or self.phase_total_is_estimate
+        )
+        self.phase_index += 1
+        self.phase_total = 0
+        self.phase_total_is_estimate = False
+        self.total_estimates.clear()
+        self.last_phase_downloaded = 0
+        self._begin_sampling_period(now, self.completed_downloaded + downloaded)
+
+    def _window_rates(self, now, cumulative_downloaded):
+        rates = []
+        samples = list(self.samples)
+        for horizon in (2.0, 4.0, 8.0, 15.0, 30.0):
+            eligible = [sample for sample in samples if sample[0] >= now - horizon]
+            if not eligible:
+                continue
+            anchor_time, anchor_bytes = eligible[0]
+            elapsed = now - anchor_time
+            if elapsed >= min(1.0, horizon / 2):
+                rates.append(max(0.0, cumulative_downloaded - anchor_bytes) / elapsed)
+        return rates
+
+    def _update_speed(self, now, cumulative_downloaded):
+        if self.last_sample_at is not None and now <= self.last_sample_at:
+            return
+
+        previous_bytes = self.samples[-1][1] if self.samples else cumulative_downloaded
+        if cumulative_downloaded > previous_bytes:
+            self.last_byte_at = now
+        self.samples.append((now, cumulative_downloaded))
+        self.last_sample_at = now
+        while self.samples and self.samples[0][0] < now - self.WINDOW_SECONDS:
+            self.samples.popleft()
+
+        rates = self._window_rates(now, cumulative_downloaded)
+        if not rates:
+            return
+        robust_rate = statistics.median(rates)
+        self.rate_history.append((now, robust_rate))
+        while self.rate_history and self.rate_history[0][0] < now - self.WINDOW_SECONDS:
+            self.rate_history.popleft()
+
+        coverage = now - self.phase_started_at if self.phase_started_at is not None else 0
+        if self.smoothed_speed is None or coverage < self.WARMUP_SECONDS:
+            self.smoothed_speed = robust_rate
+            self.last_speed_at = now
+            return
+        elapsed = max(0.001, now - (self.last_speed_at or now))
+        half_life = 3.0 if robust_rate < self.smoothed_speed else 10.0
+        alpha = 1.0 - math.exp(-math.log(2) * elapsed / half_life)
+        self.smoothed_speed += alpha * (robust_rate - self.smoothed_speed)
+        self.last_speed_at = now
+
+    def _confidence(self, now):
+        if self.phase_started_at is None:
+            return "low"
+        coverage = now - self.phase_started_at
+        rates = [rate for _, rate in self.rate_history if rate > 0]
+        if coverage < self.WARMUP_SECONDS or len(self.samples) < self.MIN_SAMPLES or not rates:
+            return "low"
+        median = statistics.median(rates)
+        deviation = statistics.median(abs(rate - median) for rate in rates) / median if median else 1.0
+        total_is_estimate = self.completed_total_is_estimate or self.phase_total_is_estimate
+        if coverage >= 15 and deviation <= 0.25 and not total_is_estimate:
+            return "high"
+        return "medium"
+
+    def _snapshot(self, now):
+        downloaded = self.completed_downloaded + self.last_phase_downloaded
+        total = self.completed_total + self.phase_total if self.phase_total else 0
+        percent = min(99.9, downloaded * 100.0 / total) if total else None
+        stalled = (
+            not self.paused
+            and self.last_byte_at is not None
+            and now - self.last_byte_at >= self.STALL_SECONDS
+        )
+        confidence = self._confidence(now)
+
+        if self.paused:
+            state = "paused"
+        elif self.phase != "downloading":
+            state = self.phase
+        elif stalled:
+            state = "stalled"
+        elif confidence == "low" or not total or not self.smoothed_speed:
+            state = "estimating"
+        else:
+            state = "downloading"
+
+        eta = None if state != "downloading" else self.smoothed_eta
+        speed = None if self.phase != "downloading" else self.smoothed_speed
+        return {
+            "percent": percent,
+            "speed": _format_speed(speed),
+            "speed_bps": int(speed) if speed and speed > 0 else None,
+            "eta": _format_eta(eta),
+            "eta_seconds": int(round(eta)) if eta is not None else None,
+            "eta_confidence": confidence,
+            "downloaded": int(downloaded),
+            "total": int(total),
+            "total_is_estimate": self.completed_total_is_estimate or self.phase_total_is_estimate,
+            "phase": self.phase,
+            "phase_index": self.phase_index,
+            "state": state,
+        }
+
+    def update(self, progress, now=None):
+        with self.lock:
+            now = self._now(now)
+            downloaded = int(_positive_number(progress.get("downloaded_bytes")))
+            exact_total = int(_positive_number(progress.get("total_bytes")))
+            estimated_total = int(_positive_number(progress.get("total_bytes_estimate")))
+
+            reset_threshold = max(1024 * 1024, self.last_phase_downloaded * 0.05)
+            if downloaded + reset_threshold < self.last_phase_downloaded:
+                self._start_next_phase(now, downloaded)
+
+            if exact_total:
+                self.phase_total = max(downloaded, exact_total)
+                self.phase_total_is_estimate = False
+                self.total_estimates.clear()
+            elif estimated_total:
+                self.total_estimates.append(estimated_total)
+                self.phase_total = max(downloaded, int(statistics.median(self.total_estimates)))
+                self.phase_total_is_estimate = True
+
+            self.phase = "downloading"
+            cumulative_downloaded = self.completed_downloaded + downloaded
+            if self.phase_started_at is None:
+                self._begin_sampling_period(now, cumulative_downloaded)
+            else:
+                self._update_speed(now, cumulative_downloaded)
+            self.last_phase_downloaded = max(self.last_phase_downloaded, downloaded)
+
+            remaining = max(0, self.completed_total + self.phase_total - cumulative_downloaded)
+            confidence = self._confidence(now)
+            if confidence != "low" and self.smoothed_speed and self.smoothed_speed > 1024 and remaining:
+                raw_eta = remaining / self.smoothed_speed
+                if self.smoothed_eta is None:
+                    self.smoothed_eta = raw_eta
+                else:
+                    elapsed = max(0.001, now - (self.last_eta_at or now))
+                    expected = max(0.0, self.smoothed_eta - elapsed)
+                    half_life = 3.0 if raw_eta > expected else 10.0
+                    alpha = 1.0 - math.exp(-math.log(2) * elapsed / half_life)
+                    self.smoothed_eta = expected + alpha * (raw_eta - expected)
+                self.last_eta_at = now
+
+            return self._snapshot(now)
+
+    def set_phase(self, phase, now=None):
+        with self.lock:
+            now = self._now(now)
+            self.phase = phase
+            self.smoothed_eta = None
+            return self._snapshot(now)
+
+    def snapshot(self, now=None):
+        with self.lock:
+            return self._snapshot(self._now(now))
+
+    def pause(self, now=None):
+        with self.lock:
+            now = self._now(now)
+            self.paused = True
+            return self._snapshot(now)
+
+    def resume(self, now=None):
+        with self.lock:
+            now = self._now(now)
+            self.paused = False
+            cumulative = self.completed_downloaded + self.last_phase_downloaded
+            self._begin_sampling_period(now, cumulative)
+            return self._snapshot(now)
+
+
+def parse_structured_progress(line, prefix=PROGRESS_PREFIX):
+    marker_at = line.find(prefix)
+    if marker_at < 0:
+        return None
+    try:
+        payload = json.loads(line[marker_at + len(prefix):])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def parse_progress(line):
+    """Legacy parser retained for older or site-specific yt-dlp output."""
     m = re.search(r"(\d+\.?\d*)%\s+of\s+~?\s*([\d.]+\w+i?B)\s+at\s+([\d.]+\w+/s|Unknown\s*\w*/s?)\s+ETA\s+([\d:]+|Unknown)", line)
     if not m:
         return None
-    pct = float(m.group(1))
-    speed_str = m.group(3) if m.group(3) != "Unknown" else None
-    eta_str = m.group(4) if m.group(4) != "Unknown" else None
-    return {"percent": pct, "speed": speed_str, "eta": eta_str}
+    total = parse_size(m.group(2))
+    percent = float(m.group(1))
+    return {
+        "downloaded_bytes": int(total * percent / 100) if total else 0,
+        "total_bytes_estimate": total,
+    }
 
 
 def parse_size(s):
@@ -636,7 +932,17 @@ def run_download(job_id, url, format_choice, format_id, title, video_range_mode=
     job["cache_dir"] = job_cache_dir
     out_template = os.path.join(job_cache_dir, f"{job_id}.%(ext)s")
 
-    cmd = [get_ytdlp_path(), "--no-playlist", "--newline", "--progress", "-c", "-o", out_template]
+    cmd = [
+        get_ytdlp_path(),
+        "--no-playlist",
+        "--newline",
+        "--progress",
+        "--progress-delta", "0.5",
+        "--progress-template", f"download:{PROGRESS_PREFIX}%(progress)j",
+        "--progress-template", f"postprocess:{POSTPROCESS_PREFIX}%(progress)j",
+        "-c",
+        "-o", out_template,
+    ]
 
     # Pass --proxy flag directly to yt-dlp in addition to env vars,
     # because some yt-dlp extractors ignore env vars and only respect --proxy.
@@ -679,6 +985,8 @@ def run_download(job_id, url, format_choice, format_id, title, video_range_mode=
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=get_ytdlp_env())
         job["proc"] = proc
         job["paused"] = False
+        estimator = DownloadProgressEstimator()
+        job["estimator"] = estimator
 
         for line in proc.stdout:
             line = line.strip()
@@ -687,19 +995,28 @@ def run_download(job_id, url, format_choice, format_id, title, video_range_mode=
             last_lines.append(line)
             if len(last_lines) > 10:
                 last_lines.pop(0)
-            prog = parse_progress(line)
-            if prog and not job.get("paused"):
-                size_m = re.search(r"of\s+~?([\d.]+\w+i?B)", line)
-                total = parse_size(size_m.group(1)) if size_m else 0
-                pct = prog["percent"]
-                job["progress"] = {
-                    "percent": pct,
-                    "speed": prog["speed"],
-                    "eta": prog["eta"],
-                    "downloaded": int(total * pct / 100) if total else 0,
-                    "total": total,
-                }
+            structured = parse_structured_progress(line)
+            if structured and not job.get("paused"):
+                job["progress"] = estimator.update(structured)
                 job["status"] = "downloading"
+                continue
+
+            if POSTPROCESS_PREFIX in line:
+                if estimator.phase == "downloading":
+                    job["progress"] = estimator.set_phase("postprocessing")
+                continue
+
+            if "[Merger]" in line:
+                job["progress"] = estimator.set_phase("merging")
+            elif "[ExtractAudio]" in line:
+                job["progress"] = estimator.set_phase("converting_audio")
+            elif "[ThumbnailsConvertor]" in line:
+                job["progress"] = estimator.set_phase("converting_thumbnail")
+            else:
+                legacy = parse_progress(line)
+                if legacy and not job.get("paused"):
+                    job["progress"] = estimator.update(legacy)
+                    job["status"] = "downloading"
 
         proc.wait()
 
@@ -740,6 +1057,9 @@ def run_download(job_id, url, format_choice, format_id, title, video_range_mode=
         job["filename"] = friendly_name
         job["progress"]["percent"] = 100.0
         job["progress"]["eta"] = None
+        job["progress"]["eta_seconds"] = None
+        job["progress"]["phase"] = "complete"
+        job["progress"]["state"] = "complete"
 
     except Exception as e:
         if job.get("status") != "cancelled":
@@ -888,7 +1208,6 @@ def start_download():
     if video_range_mode not in ("auto", "hdr", "sdr"):
         return jsonify({"error": "Invalid video range mode"}), 400
 
-    import time
     cleanup_old_jobs()
     # Generate a readable-enough job ID from URL hash + timestamp
     url_hash = re.sub(r"[^a-zA-Z0-9]", "_", url)[-40:]
@@ -900,7 +1219,7 @@ def start_download():
         "format_id": format_id,
         "video_range_mode": video_range_mode,
         "title": title,
-        "progress": {"percent": None, "speed": None, "eta": None, "downloaded": 0, "total": 0},
+        "progress": empty_progress(),
     }
 
     with queue_lock:
@@ -915,6 +1234,9 @@ def check_status(job_id):
     job = jobs.get(job_id)
     if not job:
         return jsonify({"error": "Job not found"}), 404
+    estimator = job.get("estimator")
+    if estimator and job.get("status") in ("downloading", "paused"):
+        job["progress"] = estimator.snapshot()
     resp = {
         "status": job["status"],
         "error": job.get("error"),
@@ -951,11 +1273,17 @@ def pause_download(job_id):
             _resume_process(proc)
             job["paused"] = False
             job["status"] = "downloading"
+            estimator = job.get("estimator")
+            if estimator:
+                job["progress"] = estimator.resume()
             return jsonify({"status": "resumed"})
         else:
             _suspend_process(proc)
             job["paused"] = True
             job["status"] = "paused"
+            estimator = job.get("estimator")
+            if estimator:
+                job["progress"] = estimator.pause()
             return jsonify({"status": "paused"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

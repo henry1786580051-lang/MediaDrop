@@ -583,11 +583,13 @@
     .progress-info {
       display: flex;
       justify-content: space-between;
+      gap: 12px;
       margin-top: 4px;
       font-size: 0.65rem;
       color: var(--muted);
       letter-spacing: 0.02em;
     }
+    .progress-info span:last-child { text-align: right; }
 
     /* Mobile */
     @media (max-width: 500px) {
@@ -969,6 +971,57 @@
       return `${size.toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
     }
 
+    function fmtSpeed(bytesPerSecond, fallback) {
+      if (Number.isFinite(bytesPerSecond) && bytesPerSecond > 0) {
+        return `${fmtSize(bytesPerSecond)}/秒`;
+      }
+      return fallback || '';
+    }
+
+    function roundedEta(seconds) {
+      const bucket = seconds < 120 ? 5 : seconds < 600 ? 15 : 60;
+      return Math.max(bucket, Math.round(seconds / bucket) * bucket);
+    }
+
+    function fmtEtaDuration(seconds) {
+      seconds = Math.max(0, Math.round(seconds));
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      const secs = seconds % 60;
+      if (hours) return `${hours} 小时 ${minutes} 分`;
+      if (minutes) return secs ? `${minutes} 分 ${secs} 秒` : `${minutes} 分钟`;
+      return `${secs} 秒`;
+    }
+
+    function progressPhaseLabel(phase) {
+      const labels = {
+        merging: '正在合并音视频',
+        converting_audio: '正在转换 MP3',
+        converting_thumbnail: '正在转换封面',
+        postprocessing: '正在处理媒体',
+        complete: '处理完成',
+      };
+      return labels[phase] || '';
+    }
+
+    function fmtEtaEstimate(progress, isPaused) {
+      if (isPaused || progress.state === 'paused') return '估算已暂停';
+      const phaseLabel = progressPhaseLabel(progress.phase);
+      if (phaseLabel) return phaseLabel;
+      if (progress.state === 'stalled') return '网络波动，正在重新估算';
+
+      const seconds = Number(progress.eta_seconds);
+      if (!Number.isFinite(seconds) || seconds <= 0 || progress.state === 'estimating') {
+        return '正在估算剩余时间';
+      }
+      if (progress.eta_confidence === 'medium') {
+        const lower = roundedEta(seconds * 0.85);
+        const upper = Math.max(lower, roundedEta(seconds * 1.2));
+        return `预计 ${fmtEtaDuration(lower)} 至 ${fmtEtaDuration(upper)}`;
+      }
+      return `预计剩余 ${fmtEtaDuration(roundedEta(seconds))}`;
+    }
+
     function setCardFormat(idx, fmt) {
       cardData[idx].format = fmt;
       renderCard(idx);
@@ -1224,18 +1277,24 @@
           </div>`;
       } else if (c.status === 'downloading' || c.status === 'paused') {
         const p = c.progress || {};
-        const pct = p.percent != null ? p.percent.toFixed(1) : '0';
-        const speed = p.speed || '--';
-        const eta = p.eta || '--';
+        const numericPct = Number.isFinite(p.percent) ? Math.max(0, Math.min(100, p.percent)) : null;
+        const pct = numericPct != null ? numericPct.toFixed(1) : '--';
+        const speed = fmtSpeed(p.speed_bps, p.speed);
         const downloaded = fmtSize(p.downloaded || 0);
         const total = p.total ? fmtSize(p.total) : '';
         const isPaused = c.status === 'paused';
         const statusIcon = isPaused ? '⏸' : '<span class="spin"></span>';
-        const statusText = isPaused ? '已暂停' : (total ? downloaded + ' / ' + total : '正在下载...');
+        const phaseLabel = progressPhaseLabel(p.phase);
+        const etaText = fmtEtaEstimate(p, isPaused);
+        const progressDetail = phaseLabel ? etaText : [speed, etaText].filter(Boolean).join(' · ');
+        const totalText = p.total_is_estimate ? `约 ${total}` : total;
+        const statusText = isPaused
+          ? '已暂停'
+          : phaseLabel || (total ? `${downloaded} / ${totalText}` : downloaded !== '0 B' ? `已下载 ${downloaded}` : '正在下载');
         progressHtml = `
           <div class="dl-progress">
-            <div class="progress-bar-bg"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
-            <div class="progress-info"><span>${pct}%</span><span>${speed} &middot; 剩余 ${eta}</span></div>
+            <div class="progress-bar-bg"><div class="progress-bar-fill" style="width:${numericPct || 0}%"></div></div>
+            <div class="progress-info"><span>${pct}%</span><span>${progressDetail}</span></div>
           </div>
           <div class="dl-controls">
             <span class="card-status downloading">${statusIcon} ${statusText}</span>
