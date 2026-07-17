@@ -382,8 +382,8 @@ class CacheLifecycleTests(unittest.TestCase):
         proc.poll.return_value = None
 
         with mock.patch.object(server.sys, "platform", "darwin"), \
-             mock.patch.object(server.os, "getpgid", return_value=4321), \
-             mock.patch.object(server.os, "killpg") as kill_group:
+             mock.patch.object(server.os, "getpgid", return_value=4321, create=True), \
+             mock.patch.object(server.os, "killpg", create=True) as kill_group:
             server.terminate_process_tree(proc)
 
         kill_group.assert_called_once_with(4321, server.signal.SIGTERM)

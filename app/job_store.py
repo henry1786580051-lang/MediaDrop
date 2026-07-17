@@ -3,6 +3,7 @@ import os
 import sqlite3
 import threading
 import time
+from contextlib import closing, contextmanager
 
 
 PERSISTED_FIELDS = (
@@ -39,8 +40,14 @@ class JobStore:
         connection.execute("PRAGMA busy_timeout = 5000")
         return connection
 
+    @contextmanager
+    def _connection(self):
+        with closing(self._connect()) as connection:
+            with connection:
+                yield connection
+
     def _initialize(self):
-        with self.lock, self._connect() as connection:
+        with self.lock, self._connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute(
                 """
@@ -63,7 +70,7 @@ class JobStore:
         payload.setdefault("created_at", now)
         payload["updated_at"] = now
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        with self.lock, self._connect() as connection:
+        with self.lock, self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO jobs(id, payload, status, created_at, updated_at)
@@ -78,7 +85,7 @@ class JobStore:
 
     def load_recent(self, limit=200):
         limit = max(1, min(int(limit), 1000))
-        with self.lock, self._connect() as connection:
+        with self.lock, self._connection() as connection:
             rows = connection.execute(
                 "SELECT id, payload FROM jobs ORDER BY updated_at DESC LIMIT ?", (limit,)
             ).fetchall()
@@ -93,12 +100,12 @@ class JobStore:
         return result
 
     def delete(self, job_id):
-        with self.lock, self._connect() as connection:
+        with self.lock, self._connection() as connection:
             connection.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
 
     def trim(self, keep=200):
         keep = max(20, min(int(keep), 1000))
-        with self.lock, self._connect() as connection:
+        with self.lock, self._connection() as connection:
             connection.execute(
                 """
                 DELETE FROM jobs WHERE id IN (
