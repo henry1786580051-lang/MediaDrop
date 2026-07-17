@@ -1,6 +1,7 @@
 import os
 import re
 import glob
+import hashlib
 import json
 import subprocess
 import threading
@@ -13,26 +14,33 @@ import errno
 import tempfile
 import uuid
 import math
+import platform
 import statistics
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import deque
 
-from flask import Flask, request, jsonify, send_file, render_template
+from flask import Flask, request, jsonify, send_file, render_template, redirect, make_response
+
+try:
+    from job_store import JobStore
+except ImportError:
+    from app.job_store import JobStore
 
 
 def get_base_dir():
     """Return the directory for writable data (config.json, downloads/).
 
-    Frozen (PyInstaller): MEDIADROP_DATA_DIR env var from Electron, or next to executable.
-    Dev: directory containing this script.
+    MEDIADROP_DATA_DIR can override the location for packaged or development runs.
+    Frozen fallback: next to executable. Development fallback: this script's directory.
     """
+    data_dir = os.environ.get("MEDIADROP_DATA_DIR")
+    if data_dir:
+        os.makedirs(data_dir, exist_ok=True)
+        return os.path.realpath(data_dir)
     if getattr(sys, "frozen", False):
-        data_dir = os.environ.get("MEDIADROP_DATA_DIR")
-        if data_dir:
-            os.makedirs(data_dir, exist_ok=True)
-            return data_dir
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
@@ -116,30 +124,105 @@ def handle_broken_pipe(e):
     print(f"[error] Broken pipe: {e}", file=sys.stderr, flush=True)
     return jsonify({"error": "Connection lost. Please try again."}), 400
 
-CONFIG_FILE = os.path.join(get_base_dir(), "config.json")
-MAX_CONCURRENT_DOWNLOADS = 2
+DEFAULT_MAX_CONCURRENT_DOWNLOADS = 2
+API_TOKEN = os.environ.get("MEDIADROP_API_TOKEN", "")
 
-# In-memory job tracker. Each entry: { status, proc, progress, file, filename, ... }
-# Not persisted — jobs are lost on restart, which is acceptable for a desktop app.
+# Runtime task objects live in memory; serializable state is journaled to SQLite.
 jobs = {}
 download_queue = []
 active_downloads = set()
 queue_lock = threading.Lock()
 filename_lock = threading.Lock()
+store_lock = threading.Lock()
 CACHE_DIR_NAME = ".mediadrop-cache"
 shutdown_event = threading.Event()
+_job_store = None
+_job_store_path = None
+
+
+def get_job_store():
+    global _job_store, _job_store_path
+    path = os.path.join(get_base_dir(), "jobs.sqlite3")
+    with store_lock:
+        if _job_store is None or _job_store_path != os.path.realpath(path):
+            _job_store = JobStore(path)
+            _job_store_path = os.path.realpath(path)
+        return _job_store
+
+
+def persist_job(job_id, force=False):
+    job = jobs.get(job_id)
+    if not job:
+        return
+    now = time.monotonic()
+    if not force and now - job.get("_last_persist", 0) < 2:
+        return
+    job.setdefault("created_at", time.time())
+    get_job_store().save(job_id, job)
+    job["_last_persist"] = now
+
+
+def job_payload(job_id, job):
+    progress = job.get("progress") or empty_progress()
+    return {
+        "id": job_id,
+        "status": job.get("status", "unknown"),
+        "url": job.get("url", ""),
+        "format": job.get("format", "video"),
+        "format_id": job.get("format_id"),
+        "video_range_mode": job.get("video_range_mode", "auto"),
+        "title": job.get("title", ""),
+        "preset": job.get("preset", "recommended"),
+        "options": job.get("options") or {},
+        "progress": progress,
+        "filename": job.get("filename"),
+        "file": job.get("file") if job.get("file") and os.path.isfile(job.get("file")) else None,
+        "error": job.get("error"),
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+        "completed_at": job.get("completed_at"),
+        "resumed": bool(job.get("resumed")),
+    }
+
+
+@app.before_request
+def require_local_api_token():
+    if not API_TOKEN or not request.path.startswith("/api/"):
+        return None
+    supplied = request.headers.get("X-MediaDrop-Token") or request.cookies.get("mediadrop_token")
+    if supplied != API_TOKEN:
+        return jsonify({"error": "Unauthorized local API request"}), 403
+    return None
+
+
+@app.after_request
+def apply_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; img-src 'self' data: http: https:; "
+        "connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    )
+    return response
 
 
 def cleanup_all_jobs():
-    """Kill running downloads and remove their isolated cache files."""
+    """Stop child processes while preserving resumable task caches."""
+    if shutdown_event.is_set():
+        return
     shutdown_event.set()
     for job_id, job in list(jobs.items()):
-        if job.get("status") not in ("done", "error", "cancelled"):
-            job["status"] = "cancelled"
+        if job.get("status") not in ("done", "error", "cancelled", "missing"):
+            job["status"] = "interrupted"
+            job["error"] = None
+            persist_job(job_id, force=True)
         proc = job.get("proc")
         if proc and proc.poll() is None:
             try:
-                proc.kill()
+                terminate_process_tree(proc)
                 proc.wait(timeout=3)
             except Exception:
                 pass
@@ -147,11 +230,24 @@ def cleanup_all_jobs():
         thread = job.get("thread")
         if thread and thread is not threading.current_thread() and thread.is_alive():
             thread.join(timeout=3)
-    cleanup_cache_root()
-    print("[cleanup] Download processes and cache cleared", file=sys.stderr, flush=True)
+    print("[cleanup] Download processes stopped; resumable caches preserved", file=sys.stderr, flush=True)
 
 
 atexit.register(cleanup_all_jobs)
+
+
+def descendant_process_ids(root_pid, process_pairs):
+    """Return all descendants from (pid, parent_pid) process pairs."""
+    children = {}
+    for pid, parent_pid in process_pairs:
+        children.setdefault(parent_pid, []).append(pid)
+    result = []
+    pending = list(children.get(root_pid, ()))
+    while pending:
+        pid = pending.pop()
+        result.append(pid)
+        pending.extend(children.get(pid, ()))
+    return result
 
 
 # Windows pause/resume via NtSuspendProcess/NtResumeProcess (undocumented but stable since NT4)
@@ -163,43 +259,128 @@ if sys.platform == "win32":
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
     _PROCESS_SUSPEND_RESUME = 0x0800
+    _TH32CS_SNAPPROCESS = 0x00000002
+    _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+    class _PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
 
     # Set proper argtypes/restype so 64-bit HANDLE values aren't truncated
     _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _kernel32.CloseHandle.restype = wintypes.BOOL
 
     _ntdll.NtSuspendProcess.argtypes = [wintypes.HANDLE]
     _ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+    _ntdll.NtSuspendProcess.restype = wintypes.LONG
+    _ntdll.NtResumeProcess.restype = wintypes.LONG
+
+    _kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    _kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    _kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+    _kernel32.Process32FirstW.restype = wintypes.BOOL
+    _kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+    _kernel32.Process32NextW.restype = wintypes.BOOL
+
+    def _windows_process_pairs():
+        snapshot = _kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+        if snapshot == _INVALID_HANDLE_VALUE:
+            return []
+        pairs = []
+        try:
+            entry = _PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(entry)
+            has_entry = _kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+            while has_entry:
+                pairs.append((int(entry.th32ProcessID), int(entry.th32ParentProcessID)))
+                has_entry = _kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+        finally:
+            _kernel32.CloseHandle(snapshot)
+        return pairs
+
+    def _set_windows_process_suspended(pid, suspended):
+        handle = _kernel32.OpenProcess(_PROCESS_SUSPEND_RESUME, False, pid)
+        if not handle:
+            return False
+        try:
+            operation = _ntdll.NtSuspendProcess if suspended else _ntdll.NtResumeProcess
+            return operation(handle) == 0
+        finally:
+            _kernel32.CloseHandle(handle)
 
     def _suspend_process(proc):
-        handle = _kernel32.OpenProcess(_PROCESS_SUSPEND_RESUME, False, proc.pid)
-        if not handle:
-            print(f"[pause] OpenProcess failed for pid {proc.pid}: last_error={ctypes.get_last_error()}", file=sys.stderr, flush=True)
-            return
-        _ntdll.NtSuspendProcess(handle)
-        _kernel32.CloseHandle(handle)
+        descendants = descendant_process_ids(proc.pid, _windows_process_pairs())
+        results = [_set_windows_process_suspended(pid, True) for pid in descendants + [proc.pid]]
+        if not results or not results[-1]:
+            raise OSError(f"Could not suspend download process {proc.pid}")
 
     def _resume_process(proc):
-        handle = _kernel32.OpenProcess(_PROCESS_SUSPEND_RESUME, False, proc.pid)
-        if not handle:
-            print(f"[pause] OpenProcess failed for pid {proc.pid}: last_error={ctypes.get_last_error()}", file=sys.stderr, flush=True)
-            return
-        _ntdll.NtResumeProcess(handle)
-        _kernel32.CloseHandle(handle)
+        descendants = descendant_process_ids(proc.pid, _windows_process_pairs())
+        results = [_set_windows_process_suspended(pid, False) for pid in [proc.pid] + descendants]
+        if not results or not results[0]:
+            raise OSError(f"Could not resume download process {proc.pid}")
 else:
     def _suspend_process(proc):
-        proc.send_signal(signal.SIGSTOP)
+        os.killpg(os.getpgid(proc.pid), signal.SIGSTOP)
 
     def _resume_process(proc):
-        proc.send_signal(signal.SIGCONT)
+        os.killpg(os.getpgid(proc.pid), signal.SIGCONT)
+
+
+def terminate_process_tree(proc):
+    """Terminate yt-dlp and any ffmpeg children it started."""
+    if not proc or proc.poll() is not None:
+        return
+    if sys.platform == "win32" and getattr(proc, "pid", None):
+        result = subprocess.run(
+            ["taskkill", "/pid", str(proc.pid), "/t", "/f"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return
+    elif getattr(proc, "pid", None):
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            return
+        except (OSError, ProcessLookupError):
+            pass
+    proc.kill()
 
 
 def cleanup_old_jobs():
-    """Remove completed/errored jobs older than 100 entries."""
-    if len(jobs) > 100:
-        done_keys = [k for k, v in jobs.items() if v.get("status") in ("done", "error", "cancelled")]
-        for k in done_keys[:len(done_keys) - 50]:
-            del jobs[k]
+    """Bound runtime and journal history without removing active tasks."""
+    if len(jobs) <= 250:
+        return
+    terminal = sorted(
+        (
+            (job_id, job)
+            for job_id, job in jobs.items()
+            if job.get("status") in ("done", "error", "cancelled", "missing")
+        ),
+        key=lambda item: item[1].get("created_at", 0),
+    )
+    for job_id, _job in terminal[:max(0, len(jobs) - 200)]:
+        jobs.pop(job_id, None)
+        get_job_store().delete(job_id)
+    get_job_store().trim(keep=200)
 
 
 def get_cookie_args(cfg=None):
@@ -220,10 +401,17 @@ def get_cookie_args(cfg=None):
 def load_config():
     """Load config from disk, merging with defaults. Returns full dict."""
     default_dir = os.path.join(get_base_dir(), "downloads")
-    defaults = {"download_dir": default_dir, "proxy_url": "", "cookies_browser": "", "cookies_file": ""}
-    if os.path.exists(CONFIG_FILE):
+    defaults = {
+        "download_dir": default_dir,
+        "proxy_url": "",
+        "cookies_browser": "",
+        "cookies_file": "",
+        "max_concurrent": DEFAULT_MAX_CONCURRENT_DOWNLOADS,
+    }
+    config_file = os.path.join(get_base_dir(), "config.json")
+    if os.path.exists(config_file):
         try:
-            with open(CONFIG_FILE) as f:
+            with open(config_file, encoding="utf-8") as f:
                 cfg = json.load(f)
             # Merge with defaults so new keys are always present
             return {**defaults, **cfg}
@@ -236,8 +424,13 @@ def save_config(updates):
     """Merge updates into existing config and write to disk."""
     cfg = load_config()
     cfg.update(updates)
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(cfg, f)
+    config_file = os.path.join(get_base_dir(), "config.json")
+    temp_file = f"{config_file}.tmp"
+    with open(temp_file, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(temp_file, config_file)
 
 
 def make_unique_filename(directory, base_name, ext):
@@ -257,12 +450,12 @@ def make_unique_filename(directory, base_name, ext):
 def is_proxy_reachable(proxy_url):
     """Check if the proxy server is actually listening. Timeout 1s."""
     try:
-        # Parse host:port from URL like "http://127.0.0.1:7897"
-        match = re.match(r"https?://([^:/]+):(\d+)", proxy_url)
-        if not match:
+        parsed = urllib.parse.urlsplit(proxy_url)
+        if parsed.scheme not in ("http", "https", "socks4", "socks5", "socks5h"):
             return False
-        host, port = match.group(1), int(match.group(2))
-        with socket.create_connection((host, port), timeout=1):
+        if not parsed.hostname or not parsed.port:
+            return False
+        with socket.create_connection((parsed.hostname, parsed.port), timeout=1):
             return True
     except (OSError, ValueError):
         return False
@@ -674,8 +867,12 @@ def cleanup_job_cache(job_dir):
         return False
 
 
-def cleanup_cache_root():
-    """Remove orphaned cache entries; callers stop active jobs first."""
+def cleanup_cache_root(preserve_ids=()):
+    """Remove orphaned cache entries while retaining resumable task directories."""
+    preserved = {
+        re.sub(r"[^a-zA-Z0-9_.-]", "_", str(job_id))[:160]
+        for job_id in preserve_ids
+    }
     try:
         root = get_cache_root()
     except (OSError, RuntimeError) as exc:
@@ -686,6 +883,8 @@ def cleanup_cache_root():
     except OSError:
         return
     for entry in entries:
+        if entry.name in preserved:
+            continue
         try:
             if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
                 os.unlink(entry.path)
@@ -695,6 +894,38 @@ def cleanup_cache_root():
             pass
         except OSError as exc:
             print(f"[cleanup] Could not remove orphan {entry.path}: {exc}", file=sys.stderr, flush=True)
+
+
+def restore_jobs():
+    """Load recent history and requeue tasks interrupted by an app shutdown."""
+    restored = []
+    resumable = []
+    changed = []
+    for saved in reversed(get_job_store().load_recent(limit=200)):
+        job_id = saved.pop("id")
+        status = saved.get("status", "error")
+        saved["progress"] = saved.get("progress") or empty_progress()
+        if status in ("queued", "starting", "downloading", "paused", "interrupted"):
+            saved["status"] = "queued"
+            saved["progress"] = empty_progress()
+            saved["error"] = None
+            saved["resumed"] = True
+            resumable.append(job_id)
+            changed.append(job_id)
+        elif status == "done" and saved.get("file") and not os.path.isfile(saved["file"]):
+            saved["status"] = "missing"
+            saved["file"] = None
+            changed.append(job_id)
+        jobs[job_id] = saved
+        restored.append(job_id)
+
+    cleanup_cache_root(preserve_ids=resumable)
+    with queue_lock:
+        download_queue.extend(resumable)
+    for job_id in changed:
+        persist_job(job_id, force=True)
+    get_job_store().trim(keep=200)
+    return restored
 
 
 def cleanup_destination_temp_files(download_dir):
@@ -795,7 +1026,11 @@ def finalize_cached_file(source, download_dir, title, ext, job_id):
 
 def is_valid_url(url):
     """Basic URL validation."""
-    return bool(re.match(r'^https?://', url))
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        return parsed.scheme in ("http", "https") and bool(parsed.hostname)
+    except ValueError:
+        return False
 
 
 def get_ytdlp_env():
@@ -830,11 +1065,17 @@ def get_latest_ytdlp_release():
     )
     with urllib.request.urlopen(req, timeout=20) as resp:
         data = json.loads(resp.read().decode("utf-8"))
+    assets = {
+        asset.get("name", ""): asset.get("browser_download_url", "")
+        for asset in data.get("assets", [])
+        if asset.get("name") and asset.get("browser_download_url")
+    }
     return {
         "version": data.get("tag_name", ""),
         "name": data.get("name", ""),
         "url": data.get("html_url", ""),
         "published_at": data.get("published_at", ""),
+        "assets": assets,
     }
 
 
@@ -871,17 +1112,50 @@ def get_ytdlp_versions():
 def download_latest_ytdlp():
     latest = get_latest_ytdlp_release()
     asset_name = get_ytdlp_asset_name()
-    url = f"https://github.com/yt-dlp/yt-dlp/releases/latest/download/{asset_name}"
+    assets = latest.get("assets") or {}
+    url = assets.get(asset_name)
+    sums_url = assets.get("SHA2-256SUMS")
+    if not url or not sums_url:
+        raise RuntimeError("Latest yt-dlp release is missing executable or checksum assets")
     final_name = "yt-dlp.exe" if sys.platform == "win32" else "yt-dlp"
     tools_dir = get_tools_dir()
     tmp_path = os.path.join(tools_dir, f"{final_name}.download")
     final_path = os.path.join(tools_dir, final_name)
-    with urllib.request.urlopen(url, timeout=120) as resp, open(tmp_path, "wb") as f:
-        shutil.copyfileobj(resp, f)
-    if sys.platform != "win32":
-        os.chmod(tmp_path, 0o755)
-    os.replace(tmp_path, final_path)
-    version = run_ytdlp_version(final_path)
+    try:
+        with urllib.request.urlopen(sums_url, timeout=30) as response:
+            sums = response.read().decode("utf-8", errors="replace")
+        expected = None
+        for line in sums.splitlines():
+            parts = line.strip().split()
+            if len(parts) >= 2 and parts[-1].lstrip("*") == asset_name:
+                expected = parts[0].lower()
+                break
+        if not expected or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise RuntimeError(f"No valid SHA-256 checksum found for {asset_name}")
+
+        digest = hashlib.sha256()
+        with urllib.request.urlopen(url, timeout=120) as response, open(tmp_path, "wb") as target:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                target.write(chunk)
+            target.flush()
+            os.fsync(target.fileno())
+        if digest.hexdigest().lower() != expected:
+            raise RuntimeError("Downloaded yt-dlp failed SHA-256 verification")
+        if sys.platform != "win32":
+            os.chmod(tmp_path, 0o755)
+        version = run_ytdlp_version(tmp_path)
+        if not version or compare_version_strings(version, latest.get("version", "")) != 0:
+            raise RuntimeError("Downloaded yt-dlp version does not match the latest release")
+        os.replace(tmp_path, final_path)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
     return {
         "version": version,
         "latest": latest.get("version", ""),
@@ -894,13 +1168,15 @@ def process_download_queue():
     with queue_lock:
         if shutdown_event.is_set():
             return
-        while download_queue and len(active_downloads) < MAX_CONCURRENT_DOWNLOADS:
+        max_concurrent = max(1, min(4, int(load_config().get("max_concurrent", 2))))
+        while download_queue and len(active_downloads) < max_concurrent:
             job_id = download_queue.pop(0)
             job = jobs.get(job_id)
             if not job or job.get("status") != "queued":
                 continue
             active_downloads.add(job_id)
             job["status"] = "starting"
+            persist_job(job_id, force=True)
             thread = threading.Thread(
                 target=run_download,
                 args=(
@@ -910,6 +1186,8 @@ def process_download_queue():
                     job.get("format_id"),
                     job.get("title", ""),
                     job.get("video_range_mode", "auto"),
+                    job.get("preset", "recommended"),
+                    job.get("options") or {},
                 ),
             )
             thread.daemon = True
@@ -917,14 +1195,25 @@ def process_download_queue():
             thread.start()
 
 
-def run_download(job_id, url, format_choice, format_id, title, video_range_mode="auto"):
+def run_download(
+    job_id,
+    url,
+    format_choice,
+    format_id,
+    title,
+    video_range_mode="auto",
+    preset="recommended",
+    options=None,
+):
     job = jobs[job_id]
+    options = options or {}
     download_dir = get_download_dir()
     try:
         job_cache_dir = get_job_cache_dir(job_id)
     except Exception as exc:
         job["status"] = "error"
         job["error"] = f"Could not create download cache: {exc}"
+        persist_job(job_id, force=True)
         with queue_lock:
             active_downloads.discard(job_id)
         process_download_queue()
@@ -962,27 +1251,60 @@ def run_download(job_id, url, format_choice, format_id, title, video_range_mode=
         cmd += ["--write-thumbnail", "--convert-thumbnails", "jpg", "--skip-download"]
     elif format_choice == "audio":
         ext = ".mp3"
-        cmd += ["-x", "--audio-format", "mp3"]
+        audio_quality = str(options.get("audio_quality", "192"))
+        cmd += ["-x", "--audio-format", "mp3", "--audio-quality", f"{audio_quality}K"]
     elif format_id:
-        # User selected a specific quality — merge video+audio streams
-        ext = ".mp4"
-        cmd += ["-f", f"{format_id}+bestaudio/best", "--merge-output-format", "mp4"]
+        container = options.get("container", "mp4")
+        ext = f".{container}"
+        cmd += ["-f", f"{format_id}+bestaudio/{format_id}", "--merge-output-format", container]
     else:
-        ext = ".mp4"
-        if video_range_mode == "hdr":
-            selector = "bestvideo[dynamic_range!=SDR]+bestaudio/bestvideo+bestaudio/best"
-        elif video_range_mode == "sdr":
-            selector = "bestvideo[dynamic_range=SDR]+bestaudio/bestvideo+bestaudio/best"
+        container = options.get("container", "mp4")
+        ext = f".{container}"
+        range_filter = {
+            "hdr": "[dynamic_range!=SDR]",
+            "sdr": "[dynamic_range=SDR]",
+        }.get(video_range_mode, "")
+        video_filter = f"bestvideo{range_filter}"
+        fallback = "/best" if video_range_mode == "auto" else ""
+        if preset == "highest":
+            selector = f"{video_filter}+bestaudio{fallback}"
+        elif preset == "smallest":
+            selector = f"worstvideo{range_filter}+worstaudio" + ("/worst" if video_range_mode == "auto" else "")
+        elif preset == "compatible":
+            selector = f"bestvideo{range_filter}[vcodec^=avc1][height<=1080]+bestaudio[acodec^=mp4a]"
+            if video_range_mode == "auto":
+                selector += "/best[ext=mp4][height<=1080]/best"
         else:
-            selector = "bestvideo+bestaudio/best"
-        cmd += ["-f", selector, "--merge-output-format", "mp4"]
+            selector = f"{video_filter}[height<=1080]+bestaudio"
+            if video_range_mode == "auto":
+                selector += "/best[height<=1080]/best"
+        cmd += ["-f", selector, "--merge-output-format", container]
+
+    if format_choice != "image":
+        if options.get("subtitles") and format_choice == "video":
+            languages = options.get("subtitle_languages", "zh.*,en.*")
+            cmd += ["--write-subs", "--sub-langs", languages, "--embed-subs"]
+        if options.get("metadata"):
+            cmd.append("--embed-metadata")
+        if options.get("chapters") and format_choice == "video":
+            cmd.append("--embed-chapters")
+        if options.get("embed_thumbnail"):
+            cmd.append("--embed-thumbnail")
 
     cmd.append(url)
 
     try:
         print(f"[download] Starting download (format={format_choice})", file=sys.stderr, flush=True)
         last_lines = []
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=get_ytdlp_env())
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=get_ytdlp_env(),
+            start_new_session=sys.platform != "win32",
+        )
         job["proc"] = proc
         job["paused"] = False
         estimator = DownloadProgressEstimator()
@@ -999,11 +1321,13 @@ def run_download(job_id, url, format_choice, format_id, title, video_range_mode=
             if structured and not job.get("paused"):
                 job["progress"] = estimator.update(structured)
                 job["status"] = "downloading"
+                persist_job(job_id)
                 continue
 
             if POSTPROCESS_PREFIX in line:
                 if estimator.phase == "downloading":
                     job["progress"] = estimator.set_phase("postprocessing")
+                    persist_job(job_id)
                 continue
 
             if "[Merger]" in line:
@@ -1020,6 +1344,9 @@ def run_download(job_id, url, format_choice, format_id, title, video_range_mode=
 
         proc.wait()
 
+        if shutdown_event.is_set() and job.get("status") == "interrupted":
+            return
+
         # Don't overwrite cancelled status — user manually cancelled via UI
         if job.get("status") == "cancelled":
             return
@@ -1029,6 +1356,7 @@ def run_download(job_id, url, format_choice, format_id, title, video_range_mode=
             err_lines = [l for l in last_lines if "ERROR" in l or "error" in l.lower()]
             job["error"] = err_lines[-1] if err_lines else "\n".join(last_lines[-3:])
             print(f"[download] Failed (code {proc.returncode}): {job['error']}", file=sys.stderr, flush=True)
+            persist_job(job_id, force=True)
             return
 
         # Find downloaded file(s) — yt-dlp may produce extra files (.part, .ytdl, etc.)
@@ -1060,13 +1388,19 @@ def run_download(job_id, url, format_choice, format_id, title, video_range_mode=
         job["progress"]["eta_seconds"] = None
         job["progress"]["phase"] = "complete"
         job["progress"]["state"] = "complete"
+        job["completed_at"] = time.time()
+        persist_job(job_id, force=True)
 
     except Exception as e:
         if job.get("status") != "cancelled":
             job["status"] = "error"
             job["error"] = str(e)
+            persist_job(job_id, force=True)
     finally:
-        cleanup_job_cache(job_cache_dir)
+        if job.get("status") in ("done", "error", "cancelled", "missing"):
+            persist_job(job_id, force=True)
+        if job.get("status") != "interrupted":
+            cleanup_job_cache(job_cache_dir)
         with queue_lock:
             active_downloads.discard(job_id)
         if not shutdown_event.is_set():
@@ -1075,9 +1409,16 @@ def run_download(job_id, url, format_choice, format_id, title, video_range_mode=
 
 @app.route("/")
 def index():
+    if API_TOKEN and request.args.get("token") == API_TOKEN:
+        response = redirect("/")
+        response.set_cookie(
+            "mediadrop_token", API_TOKEN, httponly=True, samesite="Strict", secure=False
+        )
+        return response
+    if API_TOKEN and request.cookies.get("mediadrop_token") != API_TOKEN:
+        return "MediaDrop local session is not authorized", 403
     resp = render_template("index.html")
     # Prevent browser/Electron from caching the template
-    from flask import make_response
     response = make_response(resp)
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
@@ -1112,6 +1453,28 @@ def is_better_format(candidate, existing):
     if candidate_https != existing_https:
         return candidate_https
     return (candidate.get("tbr") or 0) > (existing.get("tbr") or 0)
+
+
+VALID_FORMAT_CHOICES = {"video", "audio", "image"}
+VALID_PRESETS = {"recommended", "highest", "smallest", "compatible", "custom"}
+VALID_CONTAINERS = {"mp4", "mkv", "webm"}
+VALID_AUDIO_QUALITIES = {"128", "192", "256", "320"}
+
+
+def normalize_download_options(value):
+    value = value if isinstance(value, dict) else {}
+    container = str(value.get("container", "mp4")).lower()
+    audio_quality = str(value.get("audio_quality", "192"))
+    languages = str(value.get("subtitle_languages", "zh.*,en.*")).strip()[:80]
+    return {
+        "container": container if container in VALID_CONTAINERS else "mp4",
+        "audio_quality": audio_quality if audio_quality in VALID_AUDIO_QUALITIES else "192",
+        "subtitles": bool(value.get("subtitles")),
+        "subtitle_languages": languages or "zh.*,en.*",
+        "metadata": bool(value.get("metadata")),
+        "chapters": bool(value.get("chapters")),
+        "embed_thumbnail": bool(value.get("embed_thumbnail")),
+    }
 
 
 @app.route("/api/info", methods=["POST"])
@@ -1174,12 +1537,12 @@ def get_info():
             "dynamic_range": f["_range_label"],
             "vcodec": f.get("vcodec", ""),
             "ext": f.get("ext", ""),
+            "fps": f.get("fps"),
+            "filesize": f.get("filesize") or f.get("filesize_approx"),
+            "filesize_is_estimate": not bool(f.get("filesize")),
+            "tbr": f.get("tbr"),
         })
     formats.sort(key=lambda x: (x["height"], x["hdr"]), reverse=True)
-
-    auto_format = formats[0]["id"] if formats else None
-    hdr_format = next((f["id"] for f in formats if f["hdr"]), auto_format)
-    sdr_format = next((f["id"] for f in formats if not f["hdr"]), auto_format)
 
     return jsonify({
         "title": info.get("title", ""),
@@ -1187,26 +1550,33 @@ def get_info():
         "duration": info.get("duration"),
         "uploader": info.get("uploader", ""),
         "formats": formats,
-        "default_format_ids": {"auto": auto_format, "hdr": hdr_format, "sdr": sdr_format},
         "has_hdr": any(f["hdr"] for f in formats),
     })
 
 
 @app.route("/api/download", methods=["POST"])
 def start_download():
-    data = request.json
+    data = request.get_json(silent=True) or {}
     url = data.get("url", "").strip()
     format_choice = data.get("format", "video")
     format_id = data.get("format_id")
     video_range_mode = data.get("video_range_mode", "auto")
     title = data.get("title", "")
+    preset = str(data.get("preset", "recommended")).lower()
+    options = normalize_download_options(data.get("options"))
 
     if not url:
         return jsonify({"error": "No URL provided"}), 400
     if not is_valid_url(url):
         return jsonify({"error": "Invalid URL"}), 400
+    if format_choice not in VALID_FORMAT_CHOICES:
+        return jsonify({"error": "Invalid download format"}), 400
     if video_range_mode not in ("auto", "hdr", "sdr"):
         return jsonify({"error": "Invalid video range mode"}), 400
+    if preset not in VALID_PRESETS:
+        return jsonify({"error": "Invalid download preset"}), 400
+    if format_id:
+        preset = "custom"
 
     cleanup_old_jobs()
     # Generate a readable-enough job ID from URL hash + timestamp
@@ -1219,8 +1589,12 @@ def start_download():
         "format_id": format_id,
         "video_range_mode": video_range_mode,
         "title": title,
+        "preset": preset,
+        "options": options,
         "progress": empty_progress(),
+        "created_at": time.time(),
     }
+    persist_job(job_id, force=True)
 
     with queue_lock:
         download_queue.append(job_id)
@@ -1276,6 +1650,7 @@ def pause_download(job_id):
             estimator = job.get("estimator")
             if estimator:
                 job["progress"] = estimator.resume()
+            persist_job(job_id, force=True)
             return jsonify({"status": "resumed"})
         else:
             _suspend_process(proc)
@@ -1284,6 +1659,7 @@ def pause_download(job_id):
             estimator = job.get("estimator")
             if estimator:
                 job["progress"] = estimator.pause()
+            persist_job(job_id, force=True)
             return jsonify({"status": "paused"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1296,7 +1672,7 @@ def cancel_download(job_id):
         return jsonify({"error": "Job not found"}), 404
     proc = job.get("proc")
     if proc and proc.poll() is None:
-        proc.kill()
+        terminate_process_tree(proc)
     start_next = False
     with queue_lock:
         if job_id in download_queue:
@@ -1305,6 +1681,8 @@ def cancel_download(job_id):
         elif job_id not in active_downloads:
             start_next = True
     job["status"] = "cancelled"
+    job["completed_at"] = time.time()
+    persist_job(job_id, force=True)
     # Active tasks keep their concurrency slot until the worker observes the
     # terminated process and runs its cache cleanup in finally.
     if start_next:
@@ -1315,11 +1693,85 @@ def cancel_download(job_id):
 @app.route("/api/queue")
 def queue_state():
     with queue_lock:
-        return jsonify({
-            "queued": list(download_queue),
-            "active": list(active_downloads),
-            "max_concurrent": MAX_CONCURRENT_DOWNLOADS,
-        })
+        payload = queue_payload_locked()
+    return jsonify(payload)
+
+
+def queue_payload_locked():
+    """Build queue state while the caller owns queue_lock."""
+    return {
+        "queued": list(download_queue),
+        "active": list(active_downloads),
+        "max_concurrent": max(1, min(4, int(load_config().get("max_concurrent", 2)))),
+    }
+
+
+@app.route("/api/jobs")
+def list_jobs():
+    try:
+        limit = max(1, min(int(request.args.get("limit", 50)), 200))
+    except ValueError:
+        return jsonify({"error": "Invalid task limit"}), 400
+    ordered = sorted(
+        jobs.items(), key=lambda item: item[1].get("created_at", 0), reverse=True
+    )
+    return jsonify({"jobs": [job_payload(job_id, job) for job_id, job in ordered[:limit]]})
+
+
+@app.route("/api/jobs/<job_id>/retry", methods=["POST"])
+def retry_job(job_id):
+    source = jobs.get(job_id)
+    if not source or source.get("status") not in ("done", "error", "cancelled", "missing"):
+        return jsonify({"error": "Task cannot be retried"}), 400
+    new_id = f"retry_{time.time_ns()}_{uuid.uuid4().hex[:8]}"
+    jobs[new_id] = {
+        "status": "queued",
+        "url": source.get("url", ""),
+        "format": source.get("format", "video"),
+        "format_id": source.get("format_id"),
+        "video_range_mode": source.get("video_range_mode", "auto"),
+        "title": source.get("title", ""),
+        "preset": source.get("preset", "recommended"),
+        "options": source.get("options") or {},
+        "progress": empty_progress(),
+        "created_at": time.time(),
+    }
+    persist_job(new_id, force=True)
+    with queue_lock:
+        download_queue.append(new_id)
+    process_download_queue()
+    return jsonify({"job_id": new_id})
+
+
+@app.route("/api/jobs/<job_id>", methods=["DELETE"])
+def delete_job(job_id):
+    job = jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    if job.get("status") not in ("done", "error", "cancelled", "missing"):
+        return jsonify({"error": "Active tasks cannot be removed"}), 400
+    cache_dir = job.get("cache_dir")
+    if cache_dir:
+        cleanup_job_cache(cache_dir)
+    jobs.pop(job_id, None)
+    get_job_store().delete(job_id)
+    return jsonify({"status": "deleted"})
+
+
+@app.route("/api/queue/reorder", methods=["POST"])
+def reorder_queue():
+    data = request.get_json(silent=True) or {}
+    job_id = data.get("job_id")
+    direction = data.get("direction")
+    with queue_lock:
+        if job_id not in download_queue or direction not in ("up", "down"):
+            return jsonify({"error": "Queued task or direction is invalid"}), 400
+        index = download_queue.index(job_id)
+        target = index - 1 if direction == "up" else index + 1
+        if 0 <= target < len(download_queue):
+            download_queue[index], download_queue[target] = download_queue[target], download_queue[index]
+        payload = queue_payload_locked()
+    return jsonify(payload)
 
 
 @app.route("/api/ytdlp/version")
@@ -1381,10 +1833,78 @@ def test_cookies():
 VALID_BROWSERS = {"", "chrome", "firefox", "edge", "brave", "opera", "vivaldi"}
 
 
+def _command_version(command, timeout=10):
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=timeout, env=get_ytdlp_env()
+        )
+        output = (result.stdout or result.stderr).strip().splitlines()
+        return output[0] if output else None
+    except Exception:
+        return None
+
+
+def _redacted_proxy(proxy):
+    if not proxy:
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(proxy)
+        if not parsed.hostname:
+            return "configured (invalid URL)"
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"{parsed.scheme}://{parsed.hostname}{port}"
+    except ValueError:
+        return "configured (invalid URL)"
+
+
+@app.route("/api/diagnostics")
+def diagnostics():
+    cfg = load_config()
+    proxy = cfg.get("proxy_url", "")
+    recent = sorted(
+        jobs.items(), key=lambda item: item[1].get("created_at", 0), reverse=True
+    )[:20]
+    report = {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "app_version": os.environ.get("MEDIADROP_VERSION", "development"),
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "yt_dlp": run_ytdlp_version(get_ytdlp_path()),
+        "ffmpeg": _command_version([
+            os.path.join(get_ffmpeg_dir(), "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")
+            if get_ffmpeg_dir() else "ffmpeg",
+            "-version",
+        ]),
+        "settings": {
+            "download_dir": cfg.get("download_dir"),
+            "proxy": _redacted_proxy(proxy),
+            "cookies_browser": cfg.get("cookies_browser", ""),
+            "cookies_file_configured": bool(cfg.get("cookies_file")),
+            "max_concurrent": cfg.get("max_concurrent", DEFAULT_MAX_CONCURRENT_DOWNLOADS),
+        },
+        "tasks": [
+            {
+                "id": job_id[-16:],
+                "status": job.get("status"),
+                "format": job.get("format"),
+                "preset": job.get("preset"),
+                "error": job.get("error"),
+                "created_at": job.get("created_at"),
+            }
+            for job_id, job in recent
+        ],
+    }
+    body = json.dumps(report, ensure_ascii=False, indent=2)
+    response = make_response(body)
+    response.headers["Content-Type"] = "application/json; charset=utf-8"
+    response.headers["Content-Disposition"] = "attachment; filename=mediadrop-diagnostics.json"
+    return response
+
+
 @app.route("/api/config", methods=["GET", "POST"])
 def config():
     if request.method == "POST":
-        data = request.json
+        data = request.get_json(silent=True) or {}
         updates = {}
 
         new_dir = data.get("download_dir", "").strip()
@@ -1397,7 +1917,15 @@ def config():
             updates["download_dir"] = new_dir
 
         if "proxy_url" in data:
-            updates["proxy_url"] = data["proxy_url"].strip()
+            proxy_url = str(data["proxy_url"]).strip()
+            if proxy_url:
+                try:
+                    parsed = urllib.parse.urlsplit(proxy_url)
+                    if parsed.scheme not in ("http", "https", "socks4", "socks5", "socks5h") or not parsed.hostname or not parsed.port:
+                        raise ValueError
+                except ValueError:
+                    return jsonify({"error": "Proxy URL must include a supported scheme, host, and port"}), 400
+            updates["proxy_url"] = proxy_url
 
         if "cookies_browser" in data:
             browser = data["cookies_browser"].strip().lower()
@@ -1411,8 +1939,19 @@ def config():
                 return jsonify({"error": "Cookie file does not exist"}), 400
             updates["cookies_file"] = cookie_file
 
+        if "max_concurrent" in data:
+            try:
+                max_concurrent = int(data["max_concurrent"])
+            except (TypeError, ValueError):
+                return jsonify({"error": "Concurrent downloads must be a number"}), 400
+            if not 1 <= max_concurrent <= 4:
+                return jsonify({"error": "Concurrent downloads must be between 1 and 4"}), 400
+            updates["max_concurrent"] = max_concurrent
+
         if updates:
             save_config(updates)
+            if "max_concurrent" in updates:
+                process_download_queue()
 
         cfg = load_config()
         return jsonify({
@@ -1420,6 +1959,7 @@ def config():
             "proxy_url": cfg["proxy_url"],
             "cookies_browser": cfg["cookies_browser"],
             "cookies_file": cfg["cookies_file"],
+            "max_concurrent": cfg["max_concurrent"],
         })
 
     cfg = load_config()
@@ -1428,6 +1968,7 @@ def config():
         "proxy_url": cfg["proxy_url"],
         "cookies_browser": cfg["cookies_browser"],
         "cookies_file": cfg["cookies_file"],
+        "max_concurrent": cfg["max_concurrent"],
     })
 
 
@@ -1443,9 +1984,7 @@ signal.signal(signal.SIGINT, signal_handler)
 
 
 if __name__ == "__main__":
-    # Jobs are intentionally in-memory only, so every cache entry left from a
-    # previous process is orphaned and safe to remove before accepting requests.
-    cleanup_cache_root()
+    restore_jobs()
     cleanup_destination_temp_files(get_download_dir())
 
     # First-run: import proxy from Electron's detectProxy() if config is empty.
@@ -1460,4 +1999,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8899))
     host = os.environ.get("HOST", "127.0.0.1")
     print(f"[startup] MediaDrop starting on {host}:{port}", file=sys.stderr, flush=True)
+    process_download_queue()
     app.run(host=host, port=port)

@@ -1,14 +1,160 @@
-const { app, BrowserWindow, dialog, shell, ipcMain } = require("electron");
+const { app, BrowserWindow, dialog, shell, ipcMain, net: electronNet } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const os = require("os");
 const fs = require("fs");
 const net = require("net");
+const crypto = require("crypto");
+const {
+  compareVersions,
+  isSafeExternalUrl,
+  isSupportedProxyUrl,
+  isTrustedMediaDropReleaseUrl,
+  selectReleaseAsset,
+  stopProcessTree,
+} = require("./electron-utils");
 
 let mainWindow = null;
 let flaskProcess = null;
 const DEFAULT_PORT = 8899;
 let PORT = DEFAULT_PORT; // Actual port used, may differ from DEFAULT_PORT if occupied
+const API_TOKEN = crypto.randomBytes(32).toString("hex");
+const RELEASE_API_URL = "https://api.github.com/repos/henry1786580051-lang/MediaDrop/releases/latest";
+const UPDATE_CHECK_INTERVAL = 6 * 60 * 60 * 1000;
+let updateCheckPromise = null;
+let updateState = {
+  status: "idle",
+  currentVersion: app.getVersion(),
+};
+
+function publishUpdateState(nextState) {
+  updateState = { ...updateState, ...nextState };
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isLoading()) {
+    mainWindow.webContents.send("app-update-state", updateState);
+  }
+  return updateState;
+}
+
+function canReachProxy(proxyUrl) {
+  return new Promise((resolve) => {
+    if (!isSupportedProxyUrl(proxyUrl)) {
+      resolve(false);
+      return;
+    }
+    const parsed = new URL(proxyUrl);
+    const socket = net.createConnection({ host: parsed.hostname, port: Number(parsed.port) });
+    let settled = false;
+    const finish = (reachable) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(reachable);
+    };
+    socket.setTimeout(1000);
+    socket.once("connect", () => finish(true));
+    socket.once("timeout", () => finish(false));
+    socket.once("error", () => finish(false));
+  });
+}
+
+async function applyConfiguredElectronProxy() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  let proxyUrl = "";
+  try {
+    const response = await fetch(`http://127.0.0.1:${PORT}/api/config`, {
+      headers: { "X-MediaDrop-Token": API_TOKEN },
+    });
+    if (response.ok) proxyUrl = String((await response.json()).proxy_url || "");
+  } catch {}
+
+  const session = mainWindow.webContents.session;
+  if (proxyUrl && await canReachProxy(proxyUrl)) {
+    const chromiumProxyUrl = proxyUrl.replace(/^socks5h:/i, "socks5:");
+    await session.setProxy({
+      mode: "fixed_servers",
+      proxyRules: chromiumProxyUrl,
+      proxyBypassRules: "<local>;localhost;127.0.0.1;[::1]",
+    });
+  } else {
+    await session.setProxy({ mode: "system" });
+  }
+}
+
+async function checkForAppUpdate(manual = false) {
+  if (updateCheckPromise) {
+    const result = await updateCheckPromise;
+    return manual ? publishUpdateState({ ...result, manual: true }) : result;
+  }
+  publishUpdateState({ status: "checking", manual, error: null });
+  updateCheckPromise = (async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      await applyConfiguredElectronProxy();
+      const response = await electronNet.fetch(RELEASE_API_URL, {
+        headers: {
+          Accept: "application/vnd.github+json",
+          "User-Agent": `MediaDrop/${app.getVersion()}`,
+        },
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`GitHub API returned ${response.status}`);
+      const release = await response.json();
+      if (release.draft || release.prerelease || !release.tag_name) {
+        throw new Error("Latest stable release information is unavailable");
+      }
+      const latestVersion = String(release.tag_name).replace(/^v/i, "");
+      const common = {
+        currentVersion: app.getVersion(),
+        latestVersion,
+        releaseName: release.name || `MediaDrop ${release.tag_name}`,
+        releaseNotes: String(release.body || "").slice(0, 2000),
+        releaseUrl: release.html_url,
+        checkedAt: new Date().toISOString(),
+        manual,
+        error: null,
+      };
+      if (compareVersions(latestVersion, app.getVersion()) <= 0) {
+        return publishUpdateState({ ...common, status: "up-to-date", downloadUrl: null });
+      }
+      const asset = selectReleaseAsset(release.assets, process.platform, process.arch);
+      if (!asset || !isTrustedMediaDropReleaseUrl(asset.browser_download_url)) {
+        return publishUpdateState({
+          ...common,
+          status: "unsupported",
+          assetName: null,
+          assetSize: null,
+          downloadUrl: null,
+        });
+      }
+      return publishUpdateState({
+        ...common,
+        status: "available",
+        assetName: asset.name,
+        assetSize: Number(asset.size) || null,
+        downloadUrl: asset.browser_download_url,
+      });
+    } catch (error) {
+      const message = error && error.name === "AbortError" ? "检查更新超时" : String(error.message || error);
+      return publishUpdateState({
+        status: "error",
+        currentVersion: app.getVersion(),
+        latestVersion: null,
+        releaseUrl: null,
+        assetName: null,
+        assetSize: null,
+        downloadUrl: null,
+        checkedAt: new Date().toISOString(),
+        manual,
+        error: message,
+      });
+    } finally {
+      clearTimeout(timeout);
+      updateCheckPromise = null;
+    }
+  })();
+  return updateCheckPromise;
+}
 
 // --- PATH setup (macOS only) ---
 // When launched from a DMG, macOS resets PATH to a minimal set, losing Homebrew
@@ -179,25 +325,6 @@ function checkDependencies() {
   });
 }
 
-// Safety net: kill any process still holding our port on app exit.
-// Not used during startup — findAvailablePort handles port conflicts non-destructively.
-function killPortProcess(port) {
-  if (typeof port !== 'number' || port < 1 || port > 65535) return;
-  try {
-    const { execSync } = require("child_process");
-    const output = execSync(`lsof -ti :${port}`, { encoding: "utf8", timeout: 3000 }).trim();
-    if (output) {
-      const pids = output.split("\n").filter(Boolean);
-      for (const pid of pids) {
-        try {
-          process.kill(parseInt(pid), "SIGKILL");
-          console.log(`[cleanup] Killed old process ${pid} on port ${port}`);
-        } catch {}
-      }
-    }
-  } catch {}
-}
-
 // Poll port with TCP connect every 300ms until Flask is ready or timeout.
 function waitForPort(port, timeout = 15000) {
   return new Promise((resolve, reject) => {
@@ -231,7 +358,13 @@ function startFlaskServer(proxyUrl) {
 
   return new Promise((resolve, reject) => {
     let stderrOutput = "";
-    const flaskEnv = { ...process.env, PORT: String(PORT), HOST: "127.0.0.1" };
+    const flaskEnv = {
+      ...process.env,
+      PORT: String(PORT),
+      HOST: "127.0.0.1",
+      MEDIADROP_API_TOKEN: API_TOKEN,
+      MEDIADROP_VERSION: app.getVersion(),
+    };
     if (proxyUrl) flaskEnv.PROXY_URL = proxyUrl;
 
     let args, cwd;
@@ -247,7 +380,15 @@ function startFlaskServer(proxyUrl) {
       cwd = getResourcePath();
     }
 
-    flaskProcess = spawn(python, args, { cwd, env: flaskEnv, stdio: ["ignore", "pipe", "pipe"] });
+    flaskProcess = spawn(python, args, {
+      cwd,
+      env: flaskEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+      // Packaged apps use a separate process group for tree cleanup. In
+      // development, sharing the terminal group lets Ctrl+C reach Flask too.
+      detached: app.isPackaged && process.platform !== "win32",
+      windowsHide: true,
+    });
 
     flaskProcess.on("error", (err) => {
       reject(new Error(`Failed to start server: ${err.message}`));
@@ -271,7 +412,9 @@ function startFlaskServer(proxyUrl) {
 // Fetch download dir from Flask API (used by Electron's will-download handler)
 async function getDownloadDir() {
   try {
-    const res = await fetch(`http://127.0.0.1:${PORT}/api/config`);
+    const res = await fetch(`http://127.0.0.1:${PORT}/api/config`, {
+      headers: { "X-MediaDrop-Token": API_TOKEN },
+    });
     const data = await res.json();
     return data.download_dir || null;
   } catch {
@@ -288,12 +431,26 @@ function createWindow() {
       preload: path.join(__dirname, "preload.js"),
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true,
     },
   });
 
   // Cache-bust so Chromium always loads the latest template
   mainWindow.webContents.session.clearCache().catch(() => {});
-  mainWindow.loadURL(`http://127.0.0.1:${PORT}?v=${Date.now()}`);
+  const localOrigin = `http://127.0.0.1:${PORT}`;
+  mainWindow.webContents.session.cookies.set({
+    url: localOrigin,
+    name: "mediadrop_token",
+    value: API_TOKEN,
+    httpOnly: true,
+    sameSite: "strict",
+  }).then(() => mainWindow.loadURL(`${localOrigin}?v=${Date.now()}`)).catch((error) => {
+    console.error(`[security] Could not establish local session: ${error.message}`);
+    app.quit();
+  });
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (!url.startsWith(`${localOrigin}/`) && url !== localOrigin) event.preventDefault();
+  });
 
   // Auto-save downloads to configured path instead of showing system dialog
   mainWindow.webContents.session.on("will-download", async (event, item) => {
@@ -310,7 +467,7 @@ function createWindow() {
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    if (isSafeExternalUrl(url)) shell.openExternal(url);
     return { action: "deny" };
   });
 }
@@ -342,6 +499,31 @@ ipcMain.handle("detect-proxy", () => {
   return url || "";
 });
 
+ipcMain.handle("show-item-in-folder", (_event, filePath) => {
+  if (typeof filePath !== "string" || !path.isAbsolute(filePath) || !fs.existsSync(filePath)) return false;
+  shell.showItemInFolder(filePath);
+  return true;
+});
+
+ipcMain.handle("show-notification", (_event, title, body) => {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  const { Notification } = require("electron");
+  if (!Notification.isSupported()) return false;
+  new Notification({ title: String(title).slice(0, 80), body: String(body).slice(0, 200) }).show();
+  return true;
+});
+
+ipcMain.handle("get-app-update-state", () => updateState);
+
+ipcMain.handle("check-app-update", () => checkForAppUpdate(true));
+
+ipcMain.handle("open-app-update-download", async () => {
+  const target = updateState.downloadUrl || updateState.releaseUrl;
+  if (!target || !isTrustedMediaDropReleaseUrl(target)) return false;
+  await shell.openExternal(target);
+  return true;
+});
+
 // --- App lifecycle ---
 
 app.whenReady().then(async () => {
@@ -369,6 +551,10 @@ app.whenReady().then(async () => {
     }
     await startFlaskServer(proxyUrl);
     createWindow();
+    const firstUpdateCheck = setTimeout(() => checkForAppUpdate(false), 30000);
+    firstUpdateCheck.unref();
+    const updateTimer = setInterval(() => checkForAppUpdate(false), UPDATE_CHECK_INTERVAL);
+    updateTimer.unref();
   } catch (err) {
     await dialog.showMessageBox({
       type: "error",
@@ -381,20 +567,25 @@ app.whenReady().then(async () => {
 });
 
 // Cleanup: kill Flask process group (includes all yt-dlp children) on window close
-app.on("window-all-closed", () => {
+function stopFlaskServer() {
   if (flaskProcess) {
-    // Kill Flask and all its child processes (yt-dlp)
-    try {
-      process.kill(-flaskProcess.pid, "SIGTERM");
-    } catch {
-      flaskProcess.kill("SIGTERM");
-    }
+    stopProcessTree(flaskProcess);
     flaskProcess = null;
   }
-  // Also kill any process on our port (safety net)
-  killPortProcess(PORT);
+}
+
+app.on("before-quit", stopFlaskServer);
+app.on("window-all-closed", () => {
+  stopFlaskServer();
   app.quit();
 });
+
+for (const signalName of ["SIGINT", "SIGTERM"]) {
+  process.once(signalName, () => {
+    stopFlaskServer();
+    app.quit();
+  });
+}
 
 // macOS dock click — reopen window if all were closed
 app.on("activate", () => {

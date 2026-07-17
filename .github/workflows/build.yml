@@ -23,7 +23,26 @@ on:
           - win
 
 jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci
+      - run: pip install -r app/requirements.txt
+      - run: npm test
+
   build-mac:
+    needs: test
     if: >-
       github.event_name == 'workflow_dispatch' &&
       (github.event.inputs.platforms == 'all' ||
@@ -52,7 +71,10 @@ jobs:
         shell: bash
         run: |
           mkdir -p bundled-bin
-          curl --fail --location --retry 3 -o bundled-bin/yt-dlp "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp_macos"
+          curl --fail --location --retry 3 -o bundled-bin/yt-dlp_macos "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp_macos"
+          curl --fail --location --retry 3 -o bundled-bin/SHA2-256SUMS "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/SHA2-256SUMS"
+          (cd bundled-bin && grep '  yt-dlp_macos$' SHA2-256SUMS | shasum -a 256 -c -)
+          mv bundled-bin/yt-dlp_macos bundled-bin/yt-dlp
           # Trim universal binary to arm64-only to avoid macOS "Intel chip" warning
           lipo bundled-bin/yt-dlp -thin arm64 -output bundled-bin/yt-dlp 2>/dev/null || true
           chmod +x bundled-bin/yt-dlp
@@ -85,14 +107,21 @@ jobs:
           if-no-files-found: error
 
   build-win:
+    needs: test
     if: >-
       github.event_name == 'push' ||
       github.event.inputs.platforms == 'all' ||
       github.event.inputs.platforms == 'win'
     strategy:
       matrix:
-        arch: [x64, arm64]
-    runs-on: windows-latest
+        include:
+          - arch: x64
+            runner: windows-latest
+            ffmpeg_arch: win64
+          - arch: arm64
+            runner: windows-11-arm
+            ffmpeg_arch: winarm64
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - uses: actions/checkout@v4
@@ -121,15 +150,24 @@ jobs:
           else
             ASSET="yt-dlp.exe"
           fi
-          curl --fail --location --retry 3 -o bundled-bin/yt-dlp.exe "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/${ASSET}"
+          curl --fail --location --retry 3 -o "bundled-bin/${ASSET}" "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/${ASSET}"
+          curl --fail --location --retry 3 -o bundled-bin/SHA2-256SUMS "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/SHA2-256SUMS"
+          (cd bundled-bin && grep "  ${ASSET}$" SHA2-256SUMS | sha256sum -c -)
+          if [ "$ASSET" != "yt-dlp.exe" ]; then mv "bundled-bin/${ASSET}" bundled-bin/yt-dlp.exe; fi
 
       - name: Download ffmpeg (static build)
         shell: bash
         run: |
           mkdir -p bundled-bin
-          curl --fail --location --retry 3 -o ffmpeg.zip "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+          curl --fail --location --retry 3 -o ffmpeg.zip "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-${{ matrix.ffmpeg_arch }}-gpl.zip"
           7z x ffmpeg.zip -obundled-ffmpeg
           cp bundled-ffmpeg/*/bin/ffmpeg.exe bundled-bin/ffmpeg.exe
+
+      - name: Verify native download tools
+        shell: bash
+        run: |
+          bundled-bin/yt-dlp.exe --version
+          bundled-bin/ffmpeg.exe -version
 
       - name: Copy PyInstaller output to bundled-bin
         shell: bash
@@ -159,7 +197,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [build-mac, build-win]
+    needs: [test, build-mac, build-win]
     if: >-
       always() && !cancelled() && !failure() &&
       (needs.build-mac.result == 'success' || needs.build-win.result == 'success')
@@ -168,25 +206,23 @@ jobs:
       contents: write
 
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: Delete old assets from existing release
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Prepare release notes
+        shell: bash
         run: |
-          TAG="${{ github.event.inputs.release_tag }}"
-          echo "Replacing assets on release: $TAG"
-          gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name' | while read -r name; do
-            gh release delete-asset "$TAG" "$name" --repo "${{ github.repository }}" --yes
-          done
+          awk 'BEGIN { section=0 } /^## / { if (section) exit; section=1 } section { print }' CHANGELOG.md > release-notes.md
 
       - name: Create or update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
           name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          body_path: release-notes.md
+          overwrite_files: true
           files: artifacts/**/*

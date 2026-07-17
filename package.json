@@ -1,13 +1,14 @@
 {
   "name": "mediadrop",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "Self-hosted video and audio downloader",
   "author": "MediaDrop",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test": "npm run test:frontend && npm run test:cache",
+    "test": "npm run test:frontend && npm run test:electron && npm run test:cache",
     "test:frontend": "node scripts/test-format-state.js",
+    "test:electron": "node scripts/test-electron-utils.js",
     "test:cache": "python3 -B -m unittest discover -s app/tests -v",
     "build:bin": "bash scripts/build-bin.sh",
     "verify:bundle": "node scripts/verify-bundle.js",
@@ -59,39 +60,9 @@
     "files": [
       "main.js",
       "preload.js",
-      "app/**/*",
-      "assets/**/*",
-      "!app/downloads/**",
-      "!app/config.json",
-      "!app/.mediadrop-cache/**",
-      "!app/tools/**",
-      "!app/tests/**",
-      "!downloads",
-      "!venv",
-      "!*.pyc",
-      "!__pycache__"
+      "electron-utils.js"
     ],
     "extraResources": [
-      {
-        "from": "./app/",
-        "to": "app",
-        "filter": [
-          "**/*",
-          "!venv/**",
-          "!downloads/**",
-          "!config.json",
-          "!.mediadrop-cache/**",
-          "!tools/**",
-          "!tests/**",
-          "!.git/**",
-          "!__pycache__/**",
-          "!app.py",
-          "!Dockerfile",
-          "!requirements.txt",
-          "!start.sh",
-          "!mediadrop-server.spec"
-        ]
-      },
       {
         "from": "./bundled-bin/",
         "to": "bin",

@@ -81,6 +81,29 @@
     .settings-launcher:hover { border-color: #bfc4bd; background: var(--soft); }
     .settings-launcher .gear { font-size: 1rem; line-height: 1; }
 
+    .update-banner {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto auto;
+      align-items: center;
+      gap: 12px;
+      margin: -16px 0 24px;
+      padding: 13px 14px;
+      border: 1px solid rgba(232, 93, 42, 0.35);
+      border-left: 4px solid var(--accent);
+      border-radius: var(--radius);
+      background: #fff8f4;
+      box-shadow: 0 2px 8px rgba(73, 43, 28, 0.06);
+    }
+    .update-banner[hidden] { display: none; }
+    .update-icon { color: var(--accent); font-size: 1.15rem; }
+    .update-copy { min-width: 0; }
+    .update-title { font-size: 0.8rem; font-weight: 700; }
+    .update-detail { margin-top: 3px; color: var(--muted); font-size: 0.68rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .update-download-btn { min-height: 34px; padding: 0 13px; border: 0; border-radius: 7px; background: var(--accent); color: #fff; font-size: 0.72rem; font-weight: 650; cursor: pointer; }
+    .update-download-btn:hover { background: var(--accent-hover); }
+    .update-close { width: 30px; height: 30px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 1rem; cursor: pointer; }
+    .update-close:hover { background: rgba(232, 93, 42, 0.08); color: var(--fg); }
+
     .url-composer {
       display: grid;
       grid-template-columns: minmax(0, 1fr) 132px;
@@ -348,6 +371,26 @@
     .range-pill.active { background: var(--fg); color: var(--bg); }
     .range-pill:not(.active):hover { color: var(--fg); }
     .range-pill:disabled { opacity: 0.4; cursor: not-allowed; }
+    .preset-row { display: flex; gap: 6px; flex-wrap: wrap; width: 100%; margin-top: 6px; }
+    .advanced-options { width: 100%; margin-top: 7px; border-top: 1px solid var(--card-border); padding-top: 7px; }
+    .advanced-options summary { color: var(--muted); font-size: 0.68rem; cursor: pointer; }
+    .advanced-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; margin-top: 9px; }
+    .advanced-grid label { color: var(--muted); font-size: 0.68rem; }
+    .advanced-grid .select-field, .advanced-grid .text-field { display: grid; grid-template-columns: 54px minmax(0, 1fr); align-items: center; gap: 7px; }
+    .advanced-grid .check-field { display: flex; align-items: center; gap: 6px; min-height: 30px; }
+    .advanced-grid select, .advanced-grid input[type="text"] { min-width: 0; width: 100%; height: 30px; border: 1px solid var(--card-border); border-radius: 6px; background: var(--soft); color: var(--fg); padding: 0 7px; }
+
+    .task-center { margin-top: 30px; border-top: 1px solid var(--card-border); padding-top: 18px; }
+    .task-center[hidden] { display: none; }
+    .task-center-header { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; margin-bottom: 8px; }
+    .task-center h2 { font-size: 0.86rem; }
+    .task-summary { color: var(--muted); font-size: 0.68rem; }
+    .task-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--card-border); }
+    .task-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.76rem; font-weight: 600; }
+    .task-meta { margin-top: 3px; color: var(--muted); font-size: 0.65rem; }
+    .task-actions { display: flex; align-items: center; gap: 5px; }
+    .task-actions button { min-width: 30px; height: 28px; border: 1px solid var(--card-border); border-radius: 6px; background: var(--card); color: var(--fg); cursor: pointer; }
+    .task-actions button:hover { background: var(--soft); }
 
     .done-btns {
       display: flex;
@@ -596,6 +639,8 @@
       .brand h1 { font-size: 3rem; }
       .page { padding: 40px 16px 60px; }
       .app-header { margin-bottom: 28px; }
+      .update-banner { grid-template-columns: auto minmax(0, 1fr) auto; margin-top: -10px; }
+      .update-download-btn { grid-column: 1 / -1; width: 100%; }
       .settings-launcher { width: 38px; padding: 0; justify-content: center; }
       .settings-launcher .label { display: none; }
       .url-composer { grid-template-columns: 1fr; }
@@ -607,6 +652,8 @@
         height: 160px;
       }
       .card-title { white-space: normal; }
+      .advanced-grid { grid-template-columns: 1fr; }
+      .task-row { grid-template-columns: 1fr; }
       .controls { flex-wrap: wrap; }
       .fetch-btn { width: 100%; }
       .drawer-content { padding-left: 18px; padding-right: 18px; }
@@ -626,6 +673,16 @@
       </button>
     </header>
 
+    <section class="update-banner" id="appUpdateBanner" role="status" aria-live="polite" hidden>
+      <span class="update-icon" aria-hidden="true">&#8595;</span>
+      <div class="update-copy">
+        <div class="update-title" id="appUpdateTitle">发现 MediaDrop 新版本</div>
+        <div class="update-detail" id="appUpdateDetail"></div>
+      </div>
+      <button class="update-download-btn" id="appUpdateDownloadBtn" type="button" onclick="openAppUpdateDownload()">下载安装包</button>
+      <button class="update-close" type="button" onclick="dismissAppUpdate()" title="稍后提醒" aria-label="稍后提醒">&times;</button>
+    </section>
+
     <div class="url-composer">
       <textarea id="urls" placeholder="粘贴一个或多个媒体链接..." rows="2"></textarea>
       <button class="fetch-btn" id="goBtn" onclick="go()">解析链接</button>
@@ -633,6 +690,10 @@
     <p class="hint">多个链接可使用空格、逗号或换行分隔。</p>
 
     <div id="cards" class="cards"></div>
+    <section id="taskCenter" class="task-center" hidden>
+      <div class="task-center-header"><h2>任务中心</h2><span id="taskSummary" class="task-summary"></span></div>
+      <div id="taskList"></div>
+    </section>
 
     <div class="footer">
       YouTube &middot; TikTok &middot; Instagram &middot; Twitter/X &middot; Reddit &middot; Facebook<br>
@@ -657,6 +718,18 @@
             <button class="secondary-btn" type="button" onclick="browsePath()">选择</button>
           </span>
           <span class="field-help">可以选择或粘贴路径，也可以把文件夹拖放到此处。</span>
+        </label>
+        <label class="field">
+          <span class="field-label">同时下载任务数</span>
+          <span class="field-control">
+            <select id="maxConcurrent" onchange="saveConcurrency()">
+              <option value="1">1 个（网络较慢）</option>
+              <option value="2">2 个（推荐）</option>
+              <option value="3">3 个</option>
+              <option value="4">4 个</option>
+            </select>
+          </span>
+          <span class="field-help">只影响下载并发，不会中断正在运行的任务。</span>
         </label>
       </section>
 
@@ -712,6 +785,15 @@
 
       <section class="settings-section">
         <h3>维护工具</h3>
+        <div id="appUpdateSettings">
+          <div class="status-line">
+            <span>MediaDrop</span>
+            <strong id="appVersion">当前版本</strong>
+          </div>
+          <div class="tool-actions" style="margin-bottom:18px">
+            <button class="secondary-btn" id="checkAppUpdateBtn" type="button" onclick="checkAppUpdate()">检查应用更新</button>
+          </div>
+        </div>
         <div class="status-line">
           <span>yt-dlp</span>
           <strong id="ytdlpVersion">尚未检查</strong>
@@ -719,6 +801,7 @@
         <div class="tool-actions">
           <button class="secondary-btn" type="button" onclick="checkYtdlp()">检查更新</button>
           <button class="primary-btn" id="updateYtdlpBtn" type="button" onclick="updateYtdlp()" hidden>更新 yt-dlp</button>
+          <button class="secondary-btn" type="button" onclick="exportDiagnostics()">导出诊断报告</button>
         </div>
       </section>
     </div>
@@ -727,10 +810,15 @@
 
   <script>
     let cardData = [];
+    let parseController = null;
+    let taskRefreshTimer = null;
+    const notifiedJobs = new Set();
 
     // Settings
     let settingsLoaded = false;
     let settingsMessageTimer = null;
+    let currentAppUpdateState = null;
+    let dismissedAppUpdateVersion = null;
 
     function openSettings() {
       document.getElementById('settingsDrawer').classList.add('open');
@@ -769,6 +857,7 @@
         document.getElementById('proxyUrl').value = data.proxy_url || '';
         document.getElementById('cookiesBrowser').value = data.cookies_browser || 'chrome';
         document.getElementById('cookiesFile').value = data.cookies_file || '';
+        document.getElementById('maxConcurrent').value = String(data.max_concurrent || 2);
         document.getElementById('authMode').value = data.cookies_file ? 'file' : data.cookies_browser ? 'browser' : 'none';
         updateAuthFields();
         settingsLoaded = true;
@@ -804,6 +893,21 @@
       const input = document.getElementById('proxyUrl');
       const data = await postConfig({ proxy_url: input.value }, input.value ? '代理设置已保存' : '已切换为直接连接');
       if (data) input.value = data.proxy_url || '';
+    }
+
+    async function saveConcurrency() {
+      const value = Number(document.getElementById('maxConcurrent').value);
+      const data = await postConfig({ max_concurrent: value }, `同时下载任务数已设为 ${value}`);
+      if (data) document.getElementById('maxConcurrent').value = String(data.max_concurrent || 2);
+    }
+
+    function exportDiagnostics() {
+      const link = document.createElement('a');
+      link.href = '/api/diagnostics';
+      link.download = 'mediadrop-diagnostics.json';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
     }
 
     async function changeAuthMode() {
@@ -874,6 +978,64 @@
       msg.className = `settings-msg ${kind}`;
       msg.textContent = message;
       if (autoClear) settingsMessageTimer = setTimeout(() => { msg.textContent = ''; }, 2400);
+    }
+
+    function renderAppUpdateState(state) {
+      if (!state || typeof state !== 'object') return;
+      currentAppUpdateState = state;
+      const banner = document.getElementById('appUpdateBanner');
+      const current = state.currentVersion ? `v${state.currentVersion}` : '未知版本';
+      const checkButton = document.getElementById('checkAppUpdateBtn');
+      document.getElementById('appVersion').textContent = current;
+      checkButton.disabled = state.status === 'checking';
+      checkButton.textContent = state.status === 'checking' ? '正在检查...' : '检查应用更新';
+
+      if (state.status === 'available' || state.status === 'unsupported') {
+        banner.hidden = dismissedAppUpdateVersion === state.latestVersion;
+        document.getElementById('appUpdateTitle').textContent = `发现新版本 v${state.latestVersion}`;
+        document.getElementById('appUpdateDetail').textContent = state.status === 'available'
+          ? `${state.assetName}${state.assetSize ? ` · ${fmtSize(state.assetSize)}` : ''}`
+          : '当前平台没有匹配的安装包，可前往 Release 页面查看。';
+        document.getElementById('appUpdateDownloadBtn').textContent = state.status === 'available' ? '下载安装包' : '查看 Release';
+        if (state.manual) setSettingsMsg('', `发现 MediaDrop v${state.latestVersion}`);
+        return;
+      }
+
+      banner.hidden = true;
+      if (state.status === 'checking' && state.manual) {
+        setSettingsMsg('', '正在检查 MediaDrop 更新...');
+      } else if (state.status === 'up-to-date' && state.manual) {
+        setSettingsMsg('ok', `MediaDrop ${current} 已是最新版本`);
+      } else if (state.status === 'error' && state.manual) {
+        setSettingsMsg('err', `检查更新失败：${friendlyError(state.error || '未知错误')}`);
+      }
+    }
+
+    async function checkAppUpdate() {
+      if (!window.electronAPI?.checkAppUpdate) {
+        setSettingsMsg('err', '应用更新检查仅可在桌面应用中使用');
+        return;
+      }
+      try {
+        renderAppUpdateState(await window.electronAPI.checkAppUpdate());
+      } catch (error) {
+        setSettingsMsg('err', `检查更新失败：${friendlyError(error.message)}`);
+      }
+    }
+
+    async function openAppUpdateDownload() {
+      if (!window.electronAPI?.openAppUpdateDownload) return;
+      try {
+        const opened = await window.electronAPI.openAppUpdateDownload();
+        if (!opened) setSettingsMsg('err', '没有可用的安装包下载地址');
+      } catch (error) {
+        setSettingsMsg('err', `无法打开下载地址：${friendlyError(error.message)}`);
+      }
+    }
+
+    function dismissAppUpdate() {
+      dismissedAppUpdateVersion = currentAppUpdateState?.latestVersion || null;
+      document.getElementById('appUpdateBanner').hidden = true;
     }
 
     async function testCookies() {
@@ -1038,10 +1200,30 @@
     }
 
     function buildDownloadRequest(card, format = card.format || 'video') {
+      const options = card.options || {};
+      let requestOptions = {};
+      if (format === 'video') {
+        requestOptions = {
+          container: options.container || 'mp4',
+          subtitles: Boolean(options.subtitles),
+          subtitle_languages: options.subtitle_languages || 'zh.*,en.*',
+          metadata: Boolean(options.metadata),
+          chapters: Boolean(options.chapters),
+          embed_thumbnail: Boolean(options.embed_thumbnail),
+        };
+      } else if (format === 'audio') {
+        requestOptions = {
+          audio_quality: options.audio_quality || '192',
+          metadata: Boolean(options.metadata),
+          embed_thumbnail: Boolean(options.embed_thumbnail),
+        };
+      }
       return {
         format,
         formatId: format === 'video' ? (card.selectedFormatId || null) : null,
         videoRangeMode: format === 'video' ? (card.videoRangeMode || 'auto') : null,
+        preset: format === 'video' ? (card.preset || 'recommended') : 'custom',
+        options: requestOptions,
       };
     }
 
@@ -1050,6 +1232,8 @@
         request.format,
         request.formatId || null,
         request.formatId ? null : request.videoRangeMode || null,
+        request.preset || null,
+        request.options || {},
       ]);
     }
 
@@ -1073,6 +1257,19 @@
       const d = document.createElement('div');
       d.textContent = s;
       return d.innerHTML;
+    }
+
+    function attr(s) {
+      return String(s ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function safeMediaUrl(value) {
+      try {
+        const url = new URL(value);
+        return url.protocol === 'https:' || url.protocol === 'http:' ? attr(url.href) : '';
+      } catch {
+        return '';
+      }
     }
 
     function friendlyError(err) {
@@ -1120,27 +1317,33 @@
     });
 
     async function go() {
+      if (parseController) {
+        parseController.abort();
+        return;
+      }
       const urls = parseUrls(document.getElementById('urls').value);
       if (!urls.length) return;
 
       const btn = document.getElementById('goBtn');
       const container = document.getElementById('cards');
-      btn.disabled = true;
-      btn.textContent = '正在解析...';
+      parseController = new AbortController();
+      btn.textContent = '取消解析';
       container.innerHTML = '';
       cardData = [];
 
-      for (let i = 0; i < urls.length; i++) {
-        const url = urls[i];
-        const idx = cardData.length;
-        cardData.push({ url, status: 'loading' });
-        renderCard(idx);
-
+      urls.forEach(url => cardData.push({ url, status: 'loading' }));
+      cardData.forEach((_card, idx) => renderCard(idx));
+      let nextIndex = 0;
+      const worker = async () => {
+        while (nextIndex < urls.length) {
+          const idx = nextIndex++;
+          const url = urls[idx];
         try {
           const res = await fetch('/api/info', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url }),
+            signal: parseController.signal,
           });
           const data = await res.json();
           if (data.error) {
@@ -1155,24 +1358,28 @@
               duration: data.duration,
               uploader: data.uploader || '',
               formats: data.formats || [],
-              defaultFormatIds: data.default_format_ids || {},
               hasHdr: Boolean(data.has_hdr),
               videoRangeMode: 'auto',
-              selectedFormatId: data.default_format_ids?.auto || data.formats?.[0]?.id || null,
+              selectedFormatId: null,
+              preset: 'recommended',
+              options: { container: 'mp4', audio_quality: '192', subtitle_languages: 'zh.*,en.*' },
               completedDownloads: {},
             };
           }
         } catch (err) {
-          cardData[idx] = { ...cardData[idx], status: 'info-error', error: err.message };
+          cardData[idx] = { ...cardData[idx], status: 'info-error', error: err.name === 'AbortError' ? '已取消解析' : err.message };
         }
         renderCard(idx);
-      }
+        }
+      };
+
+      await Promise.all(Array.from({ length: Math.min(4, urls.length) }, worker));
 
       if (cardData.filter(c => c.status === 'ready').length > 1) {
         renderDownloadAll();
       }
 
-      btn.disabled = false;
+      parseController = null;
       btn.textContent = '解析链接';
     }
 
@@ -1227,9 +1434,9 @@
       if (isAudio) {
         thumbHtml = `<div class="no-thumb" style="color:var(--accent)"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>`;
       } else if (isImage) {
-        thumbHtml = c.thumbnail ? `<img src="${c.thumbnail}" alt="">` : `<div class="no-thumb" style="color:var(--accent)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></div>`;
+        thumbHtml = safeMediaUrl(c.thumbnail) ? `<img src="${safeMediaUrl(c.thumbnail)}" alt="">` : `<div class="no-thumb" style="color:var(--accent)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></div>`;
       } else if (c.thumbnail) {
-        thumbHtml = `<img src="${c.thumbnail}" alt="">`;
+        thumbHtml = safeMediaUrl(c.thumbnail) ? `<img src="${safeMediaUrl(c.thumbnail)}" alt="">` : `<div class="no-thumb"></div>`;
       } else {
         thumbHtml = `<div class="no-thumb"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2"/><circle cx="8" cy="8" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></div>`;
       }
@@ -1248,6 +1455,14 @@
         <button class="range-pill${rangeMode === 'sdr' ? ' active' : ''}" onclick="setVideoRangeMode(${idx}, 'sdr')">仅 SDR</button>
       </div>`;
 
+      const preset = c.preset || 'recommended';
+      const presets = [
+        ['recommended', '推荐'], ['highest', '最高画质'], ['smallest', '节省空间'], ['compatible', '兼容模式']
+      ];
+      const presetPills = `<div class="preset-row">${presets.map(([value, label]) =>
+        `<button class="q-chip${preset === value && !c.selectedFormatId ? ' active' : ''}" onclick="setPreset(${idx}, '${value}')">${label}</button>`
+      ).join('')}</div>`;
+
       // Quality chips (only for video)
       let qualityChips = '';
       if (!isAudio && !isImage && c.formats && c.formats.length > 0) {
@@ -1256,10 +1471,25 @@
           : rangeMode === 'sdr'
             ? c.formats.filter(f => !f.hdr)
             : c.formats;
-        qualityChips = visibleFormats.map(f =>
-          `<button class="q-chip${f.id === c.selectedFormatId ? ' active' : ''}" onclick="pickFormat(${idx}, '${f.id}')">${esc(f.label)}</button>`
+        qualityChips = visibleFormats.map(f => {
+          const size = f.filesize ? ` · ${f.filesize_is_estimate ? '约 ' : ''}${fmtSize(f.filesize)}` : '';
+          const fps = f.fps ? ` · ${Math.round(f.fps)}fps` : '';
+          const formatId = JSON.stringify(String(f.id)).replace(/'/g, '\\u0027');
+          return `<button class="q-chip${f.id === c.selectedFormatId ? ' active' : ''}" title="${attr((f.vcodec || '') + fps + size)}" onclick='pickFormat(${idx}, ${formatId})'>${esc(f.label)}${esc(size)}</button>`;
+        }
         ).join('');
       }
+
+      const options = c.options || {};
+      const advancedOptions = `<details class="advanced-options">
+        <summary>高级选项</summary>
+        <div class="advanced-grid">
+          ${!isAudio && !isImage ? `<label class="select-field"><span>封装</span><select onchange="setOption(${idx}, 'container', this.value)"><option value="mp4"${options.container === 'mp4' ? ' selected' : ''}>MP4</option><option value="mkv"${options.container === 'mkv' ? ' selected' : ''}>MKV</option><option value="webm"${options.container === 'webm' ? ' selected' : ''}>WebM</option></select></label>` : ''}
+          ${isAudio ? `<label class="select-field"><span>音质</span><select onchange="setOption(${idx}, 'audio_quality', this.value)"><option value="128"${options.audio_quality === '128' ? ' selected' : ''}>128 kbps</option><option value="192"${(options.audio_quality || '192') === '192' ? ' selected' : ''}>192 kbps</option><option value="256"${options.audio_quality === '256' ? ' selected' : ''}>256 kbps</option><option value="320"${options.audio_quality === '320' ? ' selected' : ''}>320 kbps</option></select></label>` : ''}
+          ${!isImage ? `<label class="check-field"><input type="checkbox" onchange="setOption(${idx}, 'metadata', this.checked)"${options.metadata ? ' checked' : ''}>写入元数据</label><label class="check-field"><input type="checkbox" onchange="setOption(${idx}, 'embed_thumbnail', this.checked)"${options.embed_thumbnail ? ' checked' : ''}>嵌入封面</label>` : ''}
+          ${!isAudio && !isImage ? `<label class="check-field"><input type="checkbox" onchange="setOption(${idx}, 'subtitles', this.checked)"${options.subtitles ? ' checked' : ''}>嵌入字幕</label><label class="check-field"><input type="checkbox" onchange="setOption(${idx}, 'chapters', this.checked)"${options.chapters ? ' checked' : ''}>保留章节</label><label class="text-field"><span>字幕语言</span><input type="text" value="${attr(options.subtitle_languages || 'zh.*,en.*')}" onchange="setOption(${idx}, 'subtitle_languages', this.value)"></label>` : ''}
+        </div>
+      </details>`;
 
       let actionHtml = '';
       let progressHtml = '';
@@ -1267,7 +1497,9 @@
       if (c.status === 'ready') {
         actionHtml = `${fmtPills}
           ${!isAudio && !isImage ? rangePills : ''}
+          ${!isAudio && !isImage ? presetPills : ''}
           ${!isAudio && !isImage && qualityChips ? '<div class="quality-row">' + qualityChips + '</div>' : ''}
+          ${advancedOptions}
           <button class="card-dl-btn" onclick="dlCard(${idx})">下载</button>`;
       } else if (c.status === 'queued') {
         progressHtml = `
@@ -1309,21 +1541,27 @@
         actionHtml = `${completionStatus}
           ${fmtPills}
           ${!isAudio && !isImage ? rangePills : ''}
+          ${!isAudio && !isImage ? presetPills : ''}
           ${!isAudio && !isImage && qualityChips ? '<div class="quality-row">' + qualityChips + '</div>' : ''}
+          ${advancedOptions}
           <div class="done-btns">
             <button class="card-dl-btn" onclick="dlCard(${idx})">${completed ? '重新下载' : '下载'}</button>
           </div>`;
       } else if (c.status === 'error') {
         actionHtml = `${fmtPills}
           ${!isAudio && !isImage ? rangePills : ''}
+          ${!isAudio && !isImage ? presetPills : ''}
           ${!isAudio && !isImage && qualityChips ? '<div class="quality-row">' + qualityChips + '</div>' : ''}
+          ${advancedOptions}
           <button class="card-dl-btn" onclick="dlCard(${idx})">重试</button>
           <span class="card-status error">${esc(friendlyError(c.error || 'Download failed'))}</span>`;
       } else if (c.status === 'cancelled') {
         actionHtml = `<span class="card-status error">已取消</span>
           ${fmtPills}
           ${!isAudio && !isImage ? rangePills : ''}
+          ${!isAudio && !isImage ? presetPills : ''}
           ${!isAudio && !isImage && qualityChips ? '<div class="quality-row">' + qualityChips + '</div>' : ''}
+          ${advancedOptions}
           <button class="card-dl-btn" onclick="dlCard(${idx})">下载</button>`;
       }
 
@@ -1367,7 +1605,7 @@
       // Stop poll immediately to prevent race with in-flight responses
       c.cancelRequested = true;
       if (c._pollInterval) {
-        clearInterval(c._pollInterval);
+        clearTimeout(c._pollInterval);
         c._pollInterval = null;
       }
       try {
@@ -1391,16 +1629,25 @@
 
     function pickFormat(idx, formatId) {
       cardData[idx].selectedFormatId = formatId;
+      cardData[idx].preset = 'custom';
       renderCard(idx);
+    }
+
+    function setPreset(idx, preset) {
+      cardData[idx].preset = preset;
+      cardData[idx].selectedFormatId = null;
+      renderCard(idx);
+    }
+
+    function setOption(idx, key, value) {
+      cardData[idx].options = { ...(cardData[idx].options || {}), [key]: value };
     }
 
     function setVideoRangeMode(idx, mode) {
       const c = cardData[idx];
       c.videoRangeMode = mode;
-      const preferred = c.defaultFormatIds?.[mode];
-      if (preferred) {
-        c.selectedFormatId = preferred;
-      }
+      c.selectedFormatId = null;
+      if (c.preset === 'custom') c.preset = 'recommended';
       renderCard(idx);
     }
 
@@ -1423,6 +1670,8 @@
             format: c.activeRequest.format,
             format_id: c.activeRequest.formatId,
             video_range_mode: c.activeRequest.videoRangeMode || 'auto',
+            preset: c.activeRequest.preset,
+            options: c.activeRequest.options,
             title: c.title || '',
           }),
         });
@@ -1444,23 +1693,22 @@
 
     function pollCard(idx) {
       const c = cardData[idx];
-      c._pollInterval = setInterval(async () => {
+      const poll = async () => {
+        c._pollInterval = null;
         if (c.cancelRequested) return;
+        let keepPolling = true;
         try {
           const res = await fetch(`/api/status/${c.jobId}`);
           const data = await res.json();
           // Ignore stale poll response if user cancelled while we were waiting
           if (c.cancelRequested) {
-            if (data.status === 'done' || data.status === 'error' || data.status === 'cancelled') {
-              clearInterval(c._pollInterval);
-            }
             return;
           }
           if (data.progress) {
             c.progress = data.progress;
           }
           if (data.status === 'done') {
-            clearInterval(c._pollInterval);
+            keepPolling = false;
             const completedRequest = c.activeRequest || buildDownloadRequest(c);
             c.completedDownloads = c.completedDownloads || {};
             c.completedDownloads[downloadRequestKey(completedRequest)] = {
@@ -1470,14 +1718,18 @@
             c.status = 'done';
             c.filename = data.filename;
             c.activeRequest = null;
+            if (!notifiedJobs.has(c.jobId)) {
+              notifiedJobs.add(c.jobId);
+              if (window.electronAPI?.notify) window.electronAPI.notify('MediaDrop 下载完成', data.filename || c.title || '文件已保存');
+            }
             renderCard(idx);
           } else if (data.status === 'error') {
-            clearInterval(c._pollInterval);
+            keepPolling = false;
             c.status = 'error';
             c.error = data.error;
             renderCard(idx);
           } else if (data.status === 'cancelled') {
-            clearInterval(c._pollInterval);
+            keepPolling = false;
             c.status = 'cancelled';
             renderCard(idx);
           } else if (data.status === 'paused') {
@@ -1492,12 +1744,16 @@
             renderCard(idx);
           }
         } catch {
-          clearInterval(c._pollInterval);
+          keepPolling = false;
           c.status = 'error';
           c.error = 'Lost connection to server';
           renderCard(idx);
         }
-      }, 1000);
+        if (keepPolling && !c.cancelRequested) {
+          c._pollInterval = setTimeout(poll, 1000);
+        }
+      };
+      c._pollInterval = setTimeout(poll, 1000);
     }
 
     async function dlAll() {
@@ -1512,6 +1768,94 @@
 
       if (btn) { btn.disabled = false; btn.textContent = '全部下载'; }
     }
+
+    const taskStatusLabels = {
+      queued: '等待中', starting: '正在启动', downloading: '下载中', paused: '已暂停',
+      interrupted: '恢复中', done: '已完成', error: '失败', cancelled: '已取消', missing: '文件已移动'
+    };
+    let taskCenterInitialized = false;
+
+    async function taskAction(id, action, extra = {}) {
+      const options = { method: 'POST' };
+      let url = action === 'pause' || action === 'cancel' ? `/api/${action}/${encodeURIComponent(id)}` : `/api/jobs/${encodeURIComponent(id)}/${action}`;
+      if (action === 'delete') {
+        url = `/api/jobs/${encodeURIComponent(id)}`;
+        options.method = 'DELETE';
+      } else if (action === 'reorder') {
+        url = '/api/queue/reorder';
+        options.headers = { 'Content-Type': 'application/json' };
+        options.body = JSON.stringify({ job_id: id, ...extra });
+      }
+      try {
+        const response = await fetch(url, options);
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || '任务操作失败');
+        await refreshTaskCenter();
+      } catch (error) {
+        setSettingsMsg('err', friendlyError(error.message), true);
+      }
+    }
+
+    function taskButtons(task) {
+      const id = JSON.stringify(task.id);
+      if (task.status === 'queued') return `<button title="上移" onclick='taskAction(${id}, "reorder", {direction:"up"})'>&uarr;</button><button title="下移" onclick='taskAction(${id}, "reorder", {direction:"down"})'>&darr;</button><button title="取消" onclick='taskAction(${id}, "cancel")'>&times;</button>`;
+      if (task.status === 'downloading' || task.status === 'paused') return `<button title="${task.status === 'paused' ? '继续' : '暂停'}" onclick='taskAction(${id}, "pause")'>${task.status === 'paused' ? '&#9654;' : '&#10074;&#10074;'}</button><button title="取消" onclick='taskAction(${id}, "cancel")'>&times;</button>`;
+      if (task.status === 'done') {
+        const file = JSON.stringify(task.file || '').replace(/'/g, '\\u0027');
+        return `<button title="在文件夹中显示" onclick='revealTaskFile(${file})'>&#128193;</button><button title="重新下载" onclick='taskAction(${id}, "retry")'>&#8635;</button><button title="移除记录" onclick='taskAction(${id}, "delete")'>&times;</button>`;
+      }
+      return `<button title="重试" onclick='taskAction(${id}, "retry")'>&#8635;</button><button title="移除记录" onclick='taskAction(${id}, "delete")'>&times;</button>`;
+    }
+
+    async function revealTaskFile(filePath) {
+      if (!filePath || !window.electronAPI?.showItemInFolder) return;
+      await window.electronAPI.showItemInFolder(filePath);
+    }
+
+    async function refreshTaskCenter() {
+      clearTimeout(taskRefreshTimer);
+      let nextRefresh = 10000;
+      try {
+        const response = await fetch('/api/jobs?limit=50');
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '无法读取任务');
+        const tasks = data.jobs || [];
+        const center = document.getElementById('taskCenter');
+        center.hidden = tasks.length === 0;
+        if (!tasks.length) return;
+        const active = tasks.filter(task => ['queued', 'starting', 'downloading', 'paused', 'interrupted'].includes(task.status));
+        if (active.length) nextRefresh = 2000;
+        const knownPercents = active.map(task => task.progress?.percent).filter(Number.isFinite);
+        const average = knownPercents.length ? ` · 总进度 ${Math.round(knownPercents.reduce((sum, value) => sum + value, 0) / knownPercents.length)}%` : '';
+        document.getElementById('taskSummary').textContent = `${active.length} 个进行中 · ${tasks.length} 条记录${average}`;
+        document.getElementById('taskList').innerHTML = tasks.map(task => {
+          const percent = Number.isFinite(task.progress?.percent) ? ` · ${task.progress.percent.toFixed(1)}%` : '';
+          const detail = task.error ? ` · ${esc(friendlyError(task.error))}` : '';
+          return `<div class="task-row"><div><div class="task-title">${esc(task.title || task.filename || '未命名任务')}</div><div class="task-meta">${taskStatusLabels[task.status] || task.status} · ${(task.format || 'video').toUpperCase()}${percent}${detail}</div></div><div class="task-actions">${taskButtons(task)}</div></div>`;
+        }).join('');
+        if (taskCenterInitialized) {
+          tasks.filter(task => task.status === 'done' && !notifiedJobs.has(task.id)).forEach(task => {
+            notifiedJobs.add(task.id);
+            if (window.electronAPI?.notify) window.electronAPI.notify('MediaDrop 下载完成', task.filename || task.title || '文件已保存');
+          });
+        } else {
+          tasks.filter(task => task.status === 'done').forEach(task => notifiedJobs.add(task.id));
+          taskCenterInitialized = true;
+        }
+      } catch {} finally {
+        taskRefreshTimer = setTimeout(refreshTaskCenter, nextRefresh);
+      }
+    }
+
+    const updateSettings = document.getElementById('appUpdateSettings');
+    if (window.electronAPI?.getAppUpdateState) {
+      window.electronAPI.onAppUpdateState?.(renderAppUpdateState);
+      window.electronAPI.getAppUpdateState().then(renderAppUpdateState).catch(() => {});
+    } else {
+      updateSettings.hidden = true;
+    }
+
+    refreshTaskCenter();
   </script>
 </body>
 </html>

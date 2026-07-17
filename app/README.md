@@ -1,66 +1,31 @@
-# MediaDrop
+# MediaDrop 后端
 
-A self-hosted, open-source video and audio downloader with a clean web UI. Paste links from YouTube, TikTok, Instagram, Twitter/X, and 1000+ other sites — download as MP4 or MP3.
+该目录包含 Flask 服务、网页界面和后端自动化测试。完整的安装与使用说明请查看仓库根目录的 [README](../README.md)。
 
-![Python](https://img.shields.io/badge/python-3.8+-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
-
-https://github.com/user-attachments/assets/419d3e50-c933-444b-8cab-a9724986ba05
-
-![MediaDrop MP3 Mode](assets/preview-mp3.png)
-
-## Features
-
-- Download videos from 1000+ supported sites (via [yt-dlp](https://github.com/yt-dlp/yt-dlp))
-- MP4 video or MP3 audio extraction
-- Quality/resolution picker
-- Bulk downloads — paste multiple URLs at once
-- Automatic URL deduplication
-- Clean, responsive UI — no frameworks, no build step
-- Single Python file backend (~150 lines)
-
-## Quick Start
+## 本地运行
 
 ```bash
-brew install yt-dlp ffmpeg    # or apt install ffmpeg && pip install yt-dlp
-git clone https://github.com/averygan/mediadrop.git
-cd mediadrop
-./mediadrop.sh
+python3 -m pip install -r requirements.txt
+python3 app.py
 ```
 
-Open **http://localhost:8899**.
+浏览器访问 `http://127.0.0.1:8899`。桌面开发建议在仓库根目录执行 `npm start`，由 Electron 自动选择端口并启动服务。
 
-Or with Docker:
+## 数据目录
+
+- `config.json`：下载位置、代理、Cookie 方式和并发数
+- `jobs.sqlite3`：任务历史与可恢复状态
+- `.mediadrop-cache/`：未完成任务的分段文件
+- `tools/`：应用内校验更新的 yt-dlp
+
+这些运行数据不会被打入安装包。完成文件会先在任务缓存内写完，再以原子方式发布到下载目录。
+
+## 测试
+
+在仓库根目录执行：
 
 ```bash
-docker build -t mediadrop . && docker run -p 8899:8899 mediadrop
+npm test
 ```
 
-## Usage
-
-1. Paste one or more video URLs into the input box
-2. Choose **MP4** (video) or **MP3** (audio)
-3. Click **Fetch** to load video info and thumbnails
-4. Select quality/resolution if available
-5. Click **Download** on individual videos, or **Download All**
-
-## Supported Sites
-
-Anything [yt-dlp supports](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md), including:
-
-YouTube, TikTok, Instagram, Twitter/X, Reddit, Facebook, Vimeo, Twitch, Dailymotion, SoundCloud, Loom, Streamable, Pinterest, Tumblr, Threads, LinkedIn, and many more.
-
-## Stack
-
-- **Backend:** Python + Flask (~150 lines)
-- **Frontend:** Vanilla HTML/CSS/JS (single file, no build step)
-- **Download engine:** [yt-dlp](https://github.com/yt-dlp/yt-dlp) + [ffmpeg](https://ffmpeg.org/)
-- **Dependencies:** 2 (Flask, yt-dlp)
-
-## Disclaimer
-
-This tool is intended for personal use only. Please respect copyright laws and the terms of service of the platforms you download from. The developers are not responsible for any misuse of this tool.
-
-## License
-
-[MIT](LICENSE)
+测试覆盖格式状态隔离、ETA、缓存生命周期、任务恢复、API 鉴权、并发配置和 yt-dlp 校验更新。

@@ -7,6 +7,7 @@ BIN_DIST="$ROOT_DIR/bin-dist"
 BUNDLED_BIN="$ROOT_DIR/bundled-bin"
 YTDLP_VERSION="${YTDLP_VERSION:-2026.07.04}"
 
+rm -rf "$BIN_DIST/mediadrop-server" "$BUNDLED_BIN"
 mkdir -p "$BUNDLED_BIN"
 
 (

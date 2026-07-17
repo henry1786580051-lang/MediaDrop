@@ -9,6 +9,9 @@ const scriptMatch = template.match(/<script>([\s\S]*?)<\/script>/);
 if (!scriptMatch) throw new Error("Inline application script was not found");
 
 const source = scriptMatch[1];
+if (/setInterval\s*\(\s*async/.test(source)) {
+  throw new Error("Async interval polling can overlap and apply stale responses");
+}
 const start = source.indexOf("function buildDownloadRequest");
 const end = source.indexOf("function parseUrls", start);
 if (start < 0 || end < 0) throw new Error("Download state helpers were not found");
@@ -41,5 +44,16 @@ assert(helpers.completedDownloadFor(card, "video")?.filename === "video.mp4", "M
 
 card.selectedFormatId = "315";
 assert(helpers.completedDownloadFor(card, "video") === null, "A different video quality inherited completion");
+
+card.selectedFormatId = null;
+card.preset = "recommended";
+const recommended = helpers.buildDownloadRequest(card, "video");
+card.completedDownloads[helpers.downloadRequestKey(recommended)] = { filename: "recommended.mp4" };
+card.preset = "highest";
+assert(helpers.completedDownloadFor(card, "video") === null, "A different preset inherited completion");
+
+card.options = { container: "mkv" };
+const imageWithVideoOptions = helpers.buildDownloadRequest(card, "image");
+assert(Object.keys(imageWithVideoOptions.options).length === 0, "JPG state included irrelevant video options");
 
 console.log("format completion state OK");

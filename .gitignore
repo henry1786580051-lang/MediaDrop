@@ -25,6 +25,7 @@ app/tools/
 .env.production
 .env.development
 app/config.json
+app/jobs.sqlite3*
 app/.mediadrop-cache/
 
 # OS files
