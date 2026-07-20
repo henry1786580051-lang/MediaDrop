@@ -45,5 +45,9 @@ assert(packageConfig.build.extraResources.some((entry) => entry.to === "bin"), "
 const pyinstallerSpec = fs.readFileSync(path.join(__dirname, "..", "app", "mediadrop-server.spec"), "utf8");
 assert(pyinstallerSpec.includes("('templates', 'templates')"), "PyInstaller no longer bundles templates");
 assert(pyinstallerSpec.includes("('static', 'static')"), "PyInstaller no longer bundles static files");
+assert(pyinstallerSpec.includes("('fonts', 'fonts')"), "PyInstaller no longer bundles subtitle fonts");
+const buildWorkflow = fs.readFileSync(path.join(__dirname, "..", ".github", "workflows", "build.yml"), "utf8");
+assert(buildWorkflow.includes("Roboto-OFL.txt"), "Release builds no longer verify the Roboto license");
+assert(buildWorkflow.includes("NotoSansCJK-OFL.txt"), "Release builds no longer verify the Noto license");
 
 console.log("electron utility checks OK");

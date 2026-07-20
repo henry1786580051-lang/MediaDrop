@@ -14,6 +14,7 @@ a = Analysis(
     datas=[
         ('templates', 'templates'),
         ('static', 'static'),
+        ('fonts', 'fonts'),
     ],
     hiddenimports=[
         'flask',

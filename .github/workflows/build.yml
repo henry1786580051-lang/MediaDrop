@@ -93,6 +93,17 @@ jobs:
           cp -r bin-dist/mediadrop-server/* bundled-bin/
           chmod +x bundled-bin/mediadrop-server
 
+      - name: Verify hard-subtitle runtime
+        shell: bash
+        run: |
+          bundled-bin/ffmpeg -hide_banner -filters 2>&1 | grep -E ' (ass|subtitles) '
+          bundled-bin/ffmpeg -hide_banner -encoders 2>&1 | grep -E 'libx264|libvpx-vp9'
+          bundled-bin/ffmpeg -hide_banner -encoders 2>&1 | grep 'h264_videotoolbox'
+          test -f bundled-bin/_internal/fonts/Roboto-Medium.ttf
+          test -f bundled-bin/_internal/fonts/NotoSansCJKsc-Regular.otf
+          test -f bundled-bin/_internal/fonts/Roboto-OFL.txt
+          test -f bundled-bin/_internal/fonts/NotoSansCJK-OFL.txt
+
       - name: Install Node dependencies
         run: npm ci
 
@@ -174,6 +185,17 @@ jobs:
         run: |
           cp -r bin-dist/mediadrop-server/* bundled-bin/
           chmod +x bundled-bin/mediadrop-server 2>/dev/null || true
+
+      - name: Verify hard-subtitle runtime
+        shell: bash
+        run: |
+          bundled-bin/ffmpeg.exe -hide_banner -filters 2>&1 | grep -E ' (ass|subtitles) '
+          bundled-bin/ffmpeg.exe -hide_banner -encoders 2>&1 | grep -E 'libx264|libvpx-vp9'
+          bundled-bin/ffmpeg.exe -hide_banner -encoders 2>&1 | grep -E 'h264_(nvenc|qsv|amf)'
+          test -f bundled-bin/_internal/fonts/Roboto-Medium.ttf
+          test -f bundled-bin/_internal/fonts/NotoSansCJKsc-Regular.otf
+          test -f bundled-bin/_internal/fonts/Roboto-OFL.txt
+          test -f bundled-bin/_internal/fonts/NotoSansCJK-OFL.txt
 
       - name: Install Node dependencies
         run: npm ci

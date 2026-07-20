@@ -190,6 +190,210 @@ class ProgressEstimatorTests(unittest.TestCase):
         self.assertIsNone(server.parse_structured_progress(server.PROGRESS_PREFIX + "not-json"))
 
 
+class SubtitleBurnTests(unittest.TestCase):
+    def test_old_embed_option_maps_to_new_subtitle_mode(self):
+        embedded = server.normalize_download_options({
+            "subtitles": True,
+            "subtitle_languages": "zh.*,en.*",
+        })
+        plain = server.normalize_download_options({})
+
+        self.assertEqual(embedded["subtitle_mode"], "embed")
+        self.assertTrue(embedded["subtitles"])
+        self.assertEqual(plain["subtitle_mode"], "none")
+
+    def test_subtitle_tracks_keep_manual_and_unique_automatic_languages(self):
+        tracks = server.subtitle_tracks_from_info({
+            "subtitles": {
+                "en": [{"name": "English", "ext": "vtt"}],
+            },
+            "automatic_captions": {
+                "en": [{"name": "English (auto)", "ext": "vtt"}],
+                "zh-Hans": [{"name": "中文（简体）", "ext": "vtt"}],
+            },
+        })
+
+        self.assertEqual([track["code"] for track in tracks], ["en", "zh-Hans"])
+        self.assertFalse(tracks[0]["automatic"])
+        self.assertTrue(tracks[1]["automatic"])
+
+    def test_dynamic_style_scales_and_compensates_for_portrait_video(self):
+        self.assertEqual(server.subtitle_style_for_resolution(1920, 1080)["font_size"], 54)
+        self.assertEqual(server.subtitle_style_for_resolution(1280, 720)["font_size"], 36)
+        self.assertEqual(server.subtitle_style_for_resolution(3840, 2160)["font_size"], 104)
+        self.assertEqual(server.subtitle_style_for_resolution(1080, 1920)["font_size"], 54)
+        self.assertEqual(server.subtitle_style_for_resolution(720, 1280)["font_size"], 36)
+        self.assertEqual(server.subtitle_style_for_resolution(1920, 1080)["outline"], 0)
+        self.assertEqual(
+            server.subtitle_style_for_resolution(1920, 1080)["background_padding"], 6
+        )
+
+    def test_video_probe_ignores_attached_cover_when_reading_resolution(self):
+        probe = mock.Mock(
+            stdout="",
+            stderr=(
+                "Duration: 00:01:02.50\n"
+                "Stream #0:0: Video: h264, yuv420p, 1920x1080, 3000 kb/s, 30 fps\n"
+                "Stream #0:1: Video: mjpeg, yuvj420p, 640x640 (attached pic)\n"
+            ),
+        )
+        with mock.patch.object(server.subprocess, "run", return_value=probe) as run:
+            result = server.probe_video_for_burn("sample.mp4", "ffmpeg")
+
+        self.assertEqual(result, (1920, 1080, 62.5, True, 3000))
+        self.assertEqual(
+            run.call_args.kwargs["encoding"],
+            "utf-8",
+        )
+        self.assertEqual(
+            run.call_args.kwargs["errors"],
+            "replace",
+        )
+
+    def test_ass_restyling_uses_white_text_background_and_video_resolution(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ass_path = pathlib.Path(temp_dir) / "subtitle.ass"
+            ass_path.write_text(
+                "[Script Info]\nPlayResX: 384\nPlayResY: 288\n"
+                "[V4+ Styles]\n"
+                "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+                "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+                "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+                "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+                "Style: Default,Arial,16,&H00FFFFFF,&H000000FF,&H00000000,"
+                "&H00000000,0,0,0,0,100,100,0,0,1,1,0,2,10,10,10,1\n"
+                "[Events]\nDialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,Hello\n",
+                encoding="utf-8",
+            )
+
+            server.restyle_ass_file(str(ass_path), 1920, 1080)
+            result = ass_path.read_text(encoding="utf-8")
+
+        self.assertIn("PlayResX: 1920", result)
+        self.assertIn("PlayResY: 1080", result)
+        self.assertIn("Style: Default,Roboto Medium,54,&H00FFFFFF", result)
+        self.assertIn("&H00000000", result)
+        self.assertIn("&H66000000", result)
+        self.assertIn(",4,0,6,2,", result)
+        self.assertIn("Dialogue:", result)
+
+    def test_nvenc_bitrate_is_limited_relative_to_source(self):
+        with mock.patch.object(server.sys, "platform", "win32"):
+            encoder = server._hardware_encoder_candidates("mp4")[0]
+        args = server._hardware_burn_video_args(encoder, 3000)
+
+        self.assertIn("p7", args)
+        self.assertIn("fullres", args)
+        self.assertEqual(args[args.index("-b:v") + 1], "3450k")
+        self.assertEqual(args[args.index("-maxrate") + 1], "4500k")
+        self.assertEqual(args[args.index("-bufsize") + 1], "9000k")
+
+    def test_hardware_detection_skips_unusable_encoder_and_caches_result(self):
+        server.hardware_encoder_cache.clear()
+        probes = []
+
+        def probe(_ffmpeg, candidate):
+            probes.append(candidate["name"])
+            return candidate["name"] == "h264_qsv"
+
+        with mock.patch.object(server.sys, "platform", "win32"), \
+             mock.patch.object(
+                 server,
+                 "_listed_video_encoders",
+                 return_value={"h264_nvenc", "h264_qsv", "h264_amf"},
+             ) as listed, \
+             mock.patch.object(server, "_probe_hardware_encoder", side_effect=probe):
+            first = server.detect_hardware_burn_encoder("ffmpeg", "mp4")
+            second = server.detect_hardware_burn_encoder("ffmpeg", "mp4")
+
+        self.assertEqual(first["name"], "h264_qsv")
+        self.assertIs(first, second)
+        self.assertEqual(probes, ["h264_nvenc", "h264_qsv"])
+        listed.assert_called_once()
+        server.hardware_encoder_cache.clear()
+
+    def test_hardware_detection_returns_none_when_driver_probe_fails(self):
+        server.hardware_encoder_cache.clear()
+        with mock.patch.object(server.sys, "platform", "win32"), \
+             mock.patch.object(
+                 server, "_listed_video_encoders", return_value={"h264_nvenc"}
+             ), \
+             mock.patch.object(server, "_probe_hardware_encoder", return_value=False):
+            selected = server.detect_hardware_burn_encoder("ffmpeg", "mp4")
+
+        self.assertIsNone(selected)
+        server.hardware_encoder_cache.clear()
+
+    def test_hardware_probe_uses_encoder_safe_frame_dimensions(self):
+        completed = mock.Mock(returncode=0)
+        candidate = {
+            "name": "h264_nvenc",
+            "video_args": ["-c:v", "h264_nvenc"],
+        }
+        with mock.patch.object(server.subprocess, "run", return_value=completed) as run:
+            self.assertTrue(server._probe_hardware_encoder("ffmpeg", candidate))
+
+        command = run.call_args.args[0]
+        self.assertIn("color=c=black:s=640x360:r=30:d=0.1", command)
+
+    def test_burn_retries_with_cpu_when_hardware_encoder_fails(self):
+        hardware = {
+            "name": "h264_nvenc",
+            "label": "NVIDIA NVENC H.264",
+            "video_args": ["-c:v", "h264_nvenc"],
+        }
+        commands = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video = pathlib.Path(temp_dir) / "source.mp4"
+            subtitle = pathlib.Path(temp_dir) / "source.en.srt"
+            video.write_bytes(b"source")
+            subtitle.write_text("subtitle", encoding="utf-8")
+            job = {
+                "cache_dir": temp_dir,
+                "status": "downloading",
+                "progress": server.empty_progress(),
+            }
+
+            def run_burn(_job_id, _job, command, _duration, _encoder, _hardware):
+                commands.append(command)
+                if len(commands) == 1:
+                    return 1, ["hardware failure"]
+                pathlib.Path(command[-1]).write_bytes(b"cpu output")
+                return 0, []
+
+            with mock.patch.object(server, "get_ffmpeg_path", return_value="ffmpeg"), \
+                 mock.patch.object(server, "ensure_subtitle_ffmpeg_support"), \
+                 mock.patch.object(
+                     server,
+                     "probe_video_for_burn",
+                     return_value=(1920, 1080, 10.0, False, 3000),
+                 ), \
+                 mock.patch.object(server, "convert_subtitle_to_ass"), \
+                 mock.patch.object(
+                     server, "detect_hardware_burn_encoder", return_value=hardware
+                 ), \
+                 mock.patch.object(
+                     server, "_run_subtitle_burn_process", side_effect=run_burn
+                 ), \
+                 mock.patch.object(server, "disable_hardware_burn_encoder") as disable:
+                server.burn_subtitle_into_video(
+                    "job", job, str(video), str(subtitle), ".mp4"
+                )
+
+            self.assertEqual(video.read_bytes(), b"cpu output")
+
+        self.assertIn("h264_nvenc", commands[0])
+        self.assertIn("libx264", commands[1])
+        disable.assert_called_once_with("ffmpeg", "mp4")
+
+    def test_downloaded_subtitle_prefers_exact_language(self):
+        files = ["job.mp4", "job.en.vtt", "job.zh-Hans.srt"]
+        self.assertEqual(
+            server.find_downloaded_subtitle(files, "zh-Hans"),
+            "job.zh-Hans.srt",
+        )
+
+
 class CacheLifecycleTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -519,6 +723,63 @@ class CacheLifecycleTests(unittest.TestCase):
         self.assertIn("--embed-metadata", captured)
         self.assertIn("--embed-chapters", captured)
 
+    def test_burn_subtitle_downloads_external_track_then_runs_ffmpeg_stage(self):
+        captured = []
+
+        class SuccessfulProcess:
+            stdout = iter([])
+            returncode = 0
+            def wait(self, timeout=None): return 0
+            def poll(self): return 0
+
+        def create_output(command, **kwargs):
+            captured.extend(command)
+            template = command[command.index("-o") + 1]
+            pathlib.Path(template.replace("%(ext)s", "mp4")).write_bytes(b"video")
+            pathlib.Path(template.replace("%(ext)s", "zh-Hans.vtt")).write_text(
+                "WEBVTT\n\n00:00.000 --> 00:01.000\n你好\n",
+                encoding="utf-8",
+            )
+            return SuccessfulProcess()
+
+        server.jobs["burn"] = {"status": "starting", "progress": server.empty_progress()}
+        server.active_downloads.add("burn")
+        patches = [
+            mock.patch.object(server, "get_download_dir", return_value=self.download_dir),
+            mock.patch.object(server, "get_ytdlp_path", return_value="yt-dlp"),
+            mock.patch.object(server, "get_proxy_url", return_value=""),
+            mock.patch.object(server, "get_cookie_args", return_value=[]),
+            mock.patch.object(server, "get_ffmpeg_dir", return_value=None),
+            mock.patch.object(server, "get_ytdlp_env", return_value={}),
+            mock.patch.object(server.subprocess, "Popen", side_effect=create_output),
+            mock.patch.object(
+                server,
+                "burn_subtitle_into_video",
+                side_effect=lambda _job_id, _job, video, _subtitle, _ext: video,
+            ),
+        ]
+        started = [patcher.start() for patcher in patches]
+        try:
+            server.run_download(
+                "burn", "https://example.com/video", "video", None, "Burn Example",
+                "sdr", "recommended", {
+                    "container": "mp4",
+                    "subtitle_mode": "burn",
+                    "burn_subtitle_language": "zh-Hans",
+                },
+            )
+        finally:
+            for patcher in reversed(patches):
+                patcher.stop()
+
+        self.assertIn("--write-subs", captured)
+        self.assertIn("--write-auto-subs", captured)
+        self.assertNotIn("--embed-subs", captured)
+        self.assertEqual(captured[captured.index("--sub-langs") + 1], "zh-Hans")
+        started[-1].assert_called_once()
+        self.assertTrue(started[-1].call_args.args[3].endswith(".zh-Hans.vtt"))
+        self.assertEqual(server.jobs["burn"]["status"], "done")
+
     def test_custom_format_never_falls_back_to_an_unrelated_stream(self):
         captured = []
 
@@ -621,6 +882,46 @@ class PersistenceAndApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["max_concurrent"], 3)
         process_queue.assert_called_once()
+
+    def test_burn_subtitle_api_requires_video_language_and_sdr(self):
+        client = server.app.test_client()
+        base = {
+            "url": "https://example.com/video",
+            "format": "video",
+            "video_range_mode": "sdr",
+            "options": {
+                "subtitle_mode": "burn",
+                "burn_subtitle_language": "zh-Hans",
+            },
+        }
+
+        missing_language = {
+            **base,
+            "options": {**base["options"], "burn_subtitle_language": ""},
+        }
+        self.assertEqual(
+            client.post("/api/download", json=missing_language).status_code, 400
+        )
+
+        audio = {**base, "format": "audio"}
+        self.assertEqual(client.post("/api/download", json=audio).status_code, 400)
+
+        hdr_mode = {**base, "video_range_mode": "hdr"}
+        self.assertEqual(client.post("/api/download", json=hdr_mode).status_code, 400)
+
+        hdr_source = {
+            **base,
+            "options": {**base["options"], "source_is_hdr": True},
+        }
+        self.assertEqual(client.post("/api/download", json=hdr_source).status_code, 400)
+
+        with mock.patch.object(server, "process_download_queue") as process_queue:
+            accepted = client.post("/api/download", json=base)
+        self.assertEqual(accepted.status_code, 200)
+        process_queue.assert_called_once()
+        job = server.jobs[accepted.get_json()["job_id"]]
+        self.assertEqual(job["options"]["subtitle_mode"], "burn")
+        self.assertEqual(job["options"]["burn_subtitle_language"], "zh-Hans")
 
     def test_reorder_queue_returns_without_reacquiring_the_queue_lock(self):
         server.download_queue.extend(["first", "second"])

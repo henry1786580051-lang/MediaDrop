@@ -110,6 +110,18 @@ def get_ffmpeg_dir():
     return None
 
 
+def get_ffmpeg_path():
+    ffmpeg_dir = get_ffmpeg_dir()
+    name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+    if ffmpeg_dir:
+        return os.path.join(ffmpeg_dir, name)
+    return shutil.which("ffmpeg") or name
+
+
+def get_fonts_dir():
+    return os.path.join(get_resource_dir(), "fonts")
+
+
 app = Flask(
     __name__,
     template_folder=os.path.join(get_resource_dir(), "templates"),
@@ -1280,10 +1292,20 @@ def run_download(
                 selector += "/best[height<=1080]/best"
         cmd += ["-f", selector, "--merge-output-format", container]
 
+    subtitle_mode = options.get("subtitle_mode")
+    if not subtitle_mode:
+        subtitle_mode = "embed" if options.get("subtitles") else "none"
     if format_choice != "image":
-        if options.get("subtitles") and format_choice == "video":
+        if subtitle_mode == "embed" and format_choice == "video":
             languages = options.get("subtitle_languages", "zh.*,en.*")
             cmd += ["--write-subs", "--sub-langs", languages, "--embed-subs"]
+        elif subtitle_mode == "burn" and format_choice == "video":
+            language = options.get("burn_subtitle_language", "")
+            cmd += [
+                "--write-subs", "--write-auto-subs",
+                "--sub-langs", language,
+                "--sub-format", "ass/srt/vtt/best",
+            ]
         if options.get("metadata"):
             cmd.append("--embed-metadata")
         if options.get("chapters") and format_choice == "video":
@@ -1374,6 +1396,19 @@ def run_download(
             job["error"] = f"Download completed without the expected {ext} file"
             return
 
+        if subtitle_mode == "burn" and format_choice == "video":
+            subtitle_path = find_downloaded_subtitle(
+                files, options.get("burn_subtitle_language", "")
+            )
+            if not subtitle_path:
+                job["status"] = "error"
+                job["error"] = "Selected subtitle language was not downloaded"
+                persist_job(job_id, force=True)
+                return
+            chosen = burn_subtitle_into_video(
+                job_id, job, chosen, subtitle_path, ext
+            )
+
         # Publish only the fully completed media file. Partials and intermediate
         # streams remain isolated in the task cache and are removed in finally.
         chosen, friendly_name = finalize_cached_file(
@@ -1459,6 +1494,7 @@ VALID_FORMAT_CHOICES = {"video", "audio", "image"}
 VALID_PRESETS = {"recommended", "highest", "smallest", "compatible", "custom"}
 VALID_CONTAINERS = {"mp4", "mkv", "webm"}
 VALID_AUDIO_QUALITIES = {"128", "192", "256", "320"}
+VALID_SUBTITLE_MODES = {"none", "embed", "burn"}
 
 
 def normalize_download_options(value):
@@ -1466,15 +1502,515 @@ def normalize_download_options(value):
     container = str(value.get("container", "mp4")).lower()
     audio_quality = str(value.get("audio_quality", "192"))
     languages = str(value.get("subtitle_languages", "zh.*,en.*")).strip()[:80]
+    subtitle_mode = str(value.get("subtitle_mode", "")).strip().lower()
+    if subtitle_mode not in VALID_SUBTITLE_MODES:
+        # Backward compatibility for jobs created before subtitle_mode existed.
+        subtitle_mode = "embed" if value.get("subtitles") else "none"
+    burn_language = str(value.get("burn_subtitle_language", "")).strip()[:40]
     return {
         "container": container if container in VALID_CONTAINERS else "mp4",
         "audio_quality": audio_quality if audio_quality in VALID_AUDIO_QUALITIES else "192",
-        "subtitles": bool(value.get("subtitles")),
+        "subtitle_mode": subtitle_mode,
+        "subtitles": subtitle_mode == "embed",
         "subtitle_languages": languages or "zh.*,en.*",
+        "burn_subtitle_language": burn_language,
+        "source_is_hdr": bool(value.get("source_is_hdr")),
         "metadata": bool(value.get("metadata")),
         "chapters": bool(value.get("chapters")),
         "embed_thumbnail": bool(value.get("embed_thumbnail")),
     }
+
+
+def subtitle_tracks_from_info(info):
+    """Return a stable, UI-friendly list of manual and automatic subtitles."""
+    tracks = []
+    manual_codes = set()
+    sources = (
+        ("manual", info.get("subtitles") or {}),
+        ("automatic", info.get("automatic_captions") or {}),
+    )
+    for source, available in sources:
+        if not isinstance(available, dict):
+            continue
+        for code, variants in available.items():
+            code = str(code or "").strip()
+            if not code or (source == "automatic" and code in manual_codes):
+                continue
+            if source == "manual":
+                manual_codes.add(code)
+            name = ""
+            if isinstance(variants, list):
+                for variant in variants:
+                    if isinstance(variant, dict) and variant.get("name"):
+                        name = str(variant["name"]).strip()
+                        break
+            tracks.append({
+                "code": code,
+                "name": name or code,
+                "automatic": source == "automatic",
+            })
+    tracks.sort(key=lambda item: (item["automatic"], item["name"].casefold(), item["code"].casefold()))
+    return tracks
+
+
+SUBTITLE_EXTENSIONS = {".ass", ".srt", ".vtt", ".ttml", ".dfxp", ".srv1", ".srv2", ".srv3"}
+hardware_encoder_cache = {}
+hardware_encoder_lock = threading.Lock()
+
+
+def _ffmpeg_filter_path(path):
+    value = os.path.realpath(path).replace("\\", "/")
+    value = value.replace(":", r"\:").replace("'", r"\'")
+    return f"'{value}'"
+
+
+def ensure_subtitle_ffmpeg_support(ffmpeg_path=None):
+    ffmpeg_path = ffmpeg_path or get_ffmpeg_path()
+    result = subprocess.run(
+        [ffmpeg_path, "-hide_banner", "-filters"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        env=get_ytdlp_env(),
+    )
+    output = f"{result.stdout}\n{result.stderr}"
+    if not re.search(r"^\s*\S+\s+(?:ass|subtitles)\s+", output, re.MULTILINE):
+        raise RuntimeError("Bundled FFmpeg does not include libass subtitle rendering")
+
+
+def probe_video_for_burn(video_path, ffmpeg_path=None):
+    """Read video properties using ffmpeg itself, avoiding another bundled binary."""
+    ffmpeg_path = ffmpeg_path or get_ffmpeg_path()
+    result = subprocess.run(
+        [ffmpeg_path, "-hide_banner", "-i", video_path],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        env=get_ytdlp_env(),
+    )
+    output = f"{result.stderr}\n{result.stdout}"
+    video_lines = [line for line in output.splitlines() if " Video:" in line]
+    video_line = next(
+        (line for line in video_lines if "(attached pic)" not in line.lower()),
+        video_lines[0] if video_lines else "",
+    )
+    has_attached_picture = any("(attached pic)" in line.lower() for line in video_lines)
+    resolution = re.search(r"(?<![\d.])(\d{2,5})x(\d{2,5})(?:[\s,\[])", video_line)
+    if not resolution:
+        raise RuntimeError("Could not determine video resolution for burned subtitles")
+    width, height = int(resolution.group(1)), int(resolution.group(2))
+    if re.search(r"rotation of\s+(?:-?90|-?270)(?:\.0+)?\s+degrees", output, re.IGNORECASE):
+        width, height = height, width
+    duration_match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", output)
+    duration = None
+    if duration_match:
+        hours, minutes, seconds = duration_match.groups()
+        duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    bitrate_match = re.search(r"(\d+(?:\.\d+)?)\s*kb/s", video_line)
+    if not bitrate_match:
+        bitrate_match = re.search(
+            r"Duration:[^\n]*bitrate:\s*(\d+(?:\.\d+)?)\s*kb/s",
+            output,
+            re.IGNORECASE,
+        )
+    video_bitrate_kbps = (
+        max(1, int(round(float(bitrate_match.group(1)))))
+        if bitrate_match else None
+    )
+    return width, height, duration, has_attached_picture, video_bitrate_kbps
+
+
+def subtitle_style_for_resolution(width, height):
+    reference_height = (
+        float(width)
+        if height > width
+        else min(float(height), float(width) * 0.75)
+    )
+    font_size = max(12, min(104, int(round(reference_height * 0.05))))
+    horizontal_margin = max(10, int(round(width * 0.05)))
+    vertical_margin = max(10, int(round(height * 0.05)))
+    background_padding = max(2, min(12, int(round(font_size * 0.12))))
+    return {
+        "font_size": font_size,
+        "outline": 0,
+        "background_padding": background_padding,
+        "margin_l": horizontal_margin,
+        "margin_r": horizontal_margin,
+        "margin_v": vertical_margin,
+    }
+
+
+def restyle_ass_file(path, width, height):
+    style = subtitle_style_for_resolution(width, height)
+    with open(path, "r", encoding="utf-8-sig") as handle:
+        lines = handle.read().splitlines()
+    output = []
+    saw_x = False
+    saw_y = False
+    for line in lines:
+        if line.startswith("PlayResX:"):
+            output.append(f"PlayResX: {width}")
+            saw_x = True
+        elif line.startswith("PlayResY:"):
+            output.append(f"PlayResY: {height}")
+            saw_y = True
+        elif line.startswith("Style:"):
+            payload = line.split(":", 1)[1].strip()
+            name = payload.split(",", 1)[0].strip() or "Default"
+            output.append(
+                "Style: "
+                f"{name},Roboto Medium,{style['font_size']},"
+                "&H00FFFFFF,&H00FFFFFF,&H00000000,&H66000000,"
+                "0,0,0,0,100,100,0,0,4,"
+                f"{style['outline']},{style['background_padding']},2,"
+                f"{style['margin_l']},{style['margin_r']},"
+                f"{style['margin_v']},1"
+            )
+        else:
+            output.append(line)
+    if not saw_x or not saw_y:
+        raise RuntimeError("Converted subtitle is missing ASS resolution metadata")
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write("\n".join(output) + "\n")
+    return style
+
+
+def find_downloaded_subtitle(files, language):
+    candidates = [
+        path for path in files
+        if os.path.splitext(path)[1].lower() in SUBTITLE_EXTENSIONS
+    ]
+    language_token = f".{language.lower()}."
+    exact = [
+        path for path in candidates
+        if language_token in os.path.basename(path).lower()
+    ]
+    if exact:
+        return sorted(exact)[0]
+    return sorted(candidates)[0] if len(candidates) == 1 else None
+
+
+def convert_subtitle_to_ass(job, subtitle_path, ass_path, width, height, ffmpeg_path=None):
+    ffmpeg_path = ffmpeg_path or get_ffmpeg_path()
+    command = [
+        ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error",
+        "-i", subtitle_path, "-c:s", "ass", ass_path,
+    ]
+    proc = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=get_ytdlp_env(),
+        start_new_session=sys.platform != "win32",
+    )
+    job["proc"] = proc
+    output, _ = proc.communicate()
+    if job.get("status") == "cancelled":
+        raise RuntimeError("Subtitle burn was cancelled")
+    if proc.returncode != 0 or not os.path.isfile(ass_path):
+        detail = (output or "").strip().splitlines()
+        raise RuntimeError(
+            f"Could not convert subtitle for burning: {detail[-1] if detail else 'FFmpeg failed'}"
+        )
+    return restyle_ass_file(ass_path, width, height)
+
+
+def _cpu_burn_video_args(container):
+    if container == "webm":
+        return ["-c:v", "libvpx-vp9", "-crf", "30", "-b:v", "0", "-row-mt", "1"]
+    return ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
+
+
+def _burn_audio_args(container):
+    if container == "mp4":
+        return ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
+    if container == "webm":
+        return ["-c:a", "libopus", "-b:a", "160k"]
+    return ["-c:a", "copy"]
+
+
+def _hardware_encoder_candidates(container):
+    if container == "webm":
+        if sys.platform == "win32":
+            return [{
+                "name": "vp9_qsv",
+                "label": "Intel Quick Sync VP9",
+                "video_args": ["-c:v", "vp9_qsv", "-preset", "medium", "-global_quality", "30"],
+                "filter_suffix": ",format=nv12",
+            }]
+        if sys.platform.startswith("linux"):
+            candidates = [{
+                "name": "vp9_qsv",
+                "label": "Intel Quick Sync VP9",
+                "video_args": ["-c:v", "vp9_qsv", "-preset", "medium", "-global_quality", "30"],
+                "filter_suffix": ",format=nv12",
+            }]
+            for device in ("/dev/dri/renderD128", "/dev/dri/renderD129"):
+                if os.path.exists(device):
+                    candidates.append({
+                        "name": "vp9_vaapi",
+                        "label": "VA-API VP9",
+                        "input_args": ["-vaapi_device", device],
+                        "video_args": ["-c:v", "vp9_vaapi", "-qp", "30"],
+                        "filter_suffix": ",format=nv12,hwupload",
+                    })
+            return candidates
+        return []
+
+    if sys.platform == "darwin":
+        return [{
+            "name": "h264_videotoolbox",
+            "label": "Apple VideoToolbox H.264",
+            "video_args": [
+                "-c:v", "h264_videotoolbox", "-q:v", "65",
+                "-allow_sw", "0", "-pix_fmt", "yuv420p",
+            ],
+        }]
+
+    candidates = [{
+        "name": "h264_nvenc",
+        "label": "NVIDIA NVENC H.264",
+        "video_args": [
+            "-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq",
+            "-rc", "vbr", "-cq", "22", "-multipass", "fullres",
+            "-spatial-aq", "1", "-temporal-aq", "1",
+            "-rc-lookahead", "32", "-b_ref_mode", "middle",
+            "-pix_fmt", "yuv420p",
+        ],
+    }, {
+        "name": "h264_qsv",
+        "label": "Intel Quick Sync H.264",
+        "video_args": [
+            "-c:v", "h264_qsv", "-preset", "medium", "-global_quality", "19",
+        ],
+        "filter_suffix": ",format=nv12",
+    }]
+    if sys.platform == "win32":
+        candidates.append({
+            "name": "h264_amf",
+            "label": "AMD AMF H.264",
+            "video_args": [
+                "-c:v", "h264_amf", "-quality", "quality", "-rc", "cqp",
+                "-qp_i", "18", "-qp_p", "18", "-qp_b", "20",
+                "-pix_fmt", "yuv420p",
+            ],
+        })
+    elif sys.platform.startswith("linux"):
+        for device in ("/dev/dri/renderD128", "/dev/dri/renderD129"):
+            if os.path.exists(device):
+                candidates.append({
+                    "name": "h264_vaapi",
+                    "label": "VA-API H.264",
+                    "input_args": ["-vaapi_device", device],
+                    "video_args": ["-c:v", "h264_vaapi", "-qp", "19"],
+                    "filter_suffix": ",format=nv12,hwupload",
+                })
+    return candidates
+
+
+def _hardware_burn_video_args(encoder, source_bitrate_kbps):
+    args = list(encoder["video_args"])
+    if encoder["name"] != "h264_nvenc" or not source_bitrate_kbps:
+        return args
+    source_bitrate_kbps = max(1, int(source_bitrate_kbps))
+    target_kbps = max(300, int(round(source_bitrate_kbps * 1.15)))
+    peak_kbps = max(target_kbps, int(round(source_bitrate_kbps * 1.5)))
+    buffer_kbps = peak_kbps * 2
+    return [
+        *args,
+        "-b:v", f"{target_kbps}k",
+        "-maxrate", f"{peak_kbps}k",
+        "-bufsize", f"{buffer_kbps}k",
+    ]
+
+
+def _listed_video_encoders(ffmpeg_path):
+    result = subprocess.run(
+        [ffmpeg_path, "-hide_banner", "-encoders"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        env=get_ytdlp_env(),
+    )
+    output = f"{result.stdout}\n{result.stderr}"
+    return set(re.findall(r"^\s*V\S*\s+(\S+)\s+", output, re.MULTILINE))
+
+
+def _probe_hardware_encoder(ffmpeg_path, candidate):
+    filter_chain = "format=yuv420p" + candidate.get("filter_suffix", "")
+    command = [
+        ffmpeg_path, "-hide_banner", "-loglevel", "error",
+        *candidate.get("input_args", []),
+        "-f", "lavfi", "-i", "color=c=black:s=640x360:r=30:d=0.1",
+        "-frames:v", "1", "-an", "-vf", filter_chain,
+        *candidate["video_args"],
+        "-f", "null", os.devnull,
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=get_ytdlp_env(),
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def detect_hardware_burn_encoder(ffmpeg_path, container):
+    cache_key = (os.path.realpath(ffmpeg_path), sys.platform, container)
+    with hardware_encoder_lock:
+        if cache_key in hardware_encoder_cache:
+            return hardware_encoder_cache[cache_key]
+        listed = _listed_video_encoders(ffmpeg_path)
+        selected = None
+        for candidate in _hardware_encoder_candidates(container):
+            if candidate["name"] in listed and _probe_hardware_encoder(ffmpeg_path, candidate):
+                selected = candidate
+                break
+        hardware_encoder_cache[cache_key] = selected
+        return selected
+
+
+def disable_hardware_burn_encoder(ffmpeg_path, container):
+    cache_key = (os.path.realpath(ffmpeg_path), sys.platform, container)
+    with hardware_encoder_lock:
+        hardware_encoder_cache[cache_key] = None
+
+
+def _run_subtitle_burn_process(job_id, job, command, duration, encoder_name, hardware):
+    proc = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        env=get_ytdlp_env(),
+        start_new_session=sys.platform != "win32",
+    )
+    job["proc"] = proc
+    job["estimator"] = None
+    started = time.monotonic()
+    job["progress"] = {
+        **empty_progress(),
+        "percent": 0.0,
+        "eta": None,
+        "eta_seconds": None,
+        "phase": "burning_subtitles",
+        "state": "burning_subtitles",
+        "encoder": encoder_name,
+        "hardware_accelerated": hardware,
+    }
+    persist_job(job_id, force=True)
+    last_lines = []
+    for raw_line in proc.stdout:
+        line = raw_line.strip()
+        if not line:
+            continue
+        last_lines.append(line)
+        if len(last_lines) > 12:
+            last_lines.pop(0)
+        if not duration or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key not in ("out_time_us", "out_time_ms"):
+            continue
+        try:
+            completed_seconds = max(0.0, float(value) / 1_000_000)
+        except ValueError:
+            continue
+        fraction = max(0.0, min(0.999, completed_seconds / duration))
+        elapsed = max(0.001, time.monotonic() - started)
+        eta_seconds = (elapsed / fraction - elapsed) if fraction > 0.01 else None
+        job["progress"].update({
+            "percent": round(fraction * 100, 1),
+            "eta_seconds": eta_seconds,
+            "eta": _format_eta(eta_seconds) if eta_seconds else None,
+        })
+        persist_job(job_id)
+    proc.wait()
+    return proc.returncode, last_lines
+
+
+def burn_subtitle_into_video(job_id, job, video_path, subtitle_path, ext):
+    ffmpeg_path = get_ffmpeg_path()
+    ensure_subtitle_ffmpeg_support(ffmpeg_path)
+    width, height, duration, has_attached_picture, source_bitrate_kbps = probe_video_for_burn(
+        video_path, ffmpeg_path
+    )
+    job_cache_dir = job["cache_dir"]
+    ass_path = os.path.join(job_cache_dir, f"{job_id}.burn.ass")
+    output_path = os.path.join(job_cache_dir, f"{job_id}.burned{ext}")
+    convert_subtitle_to_ass(job, subtitle_path, ass_path, width, height, ffmpeg_path)
+
+    fonts_dir = get_fonts_dir()
+    required_fonts = ("Roboto-Medium.ttf", "NotoSansCJKsc-Regular.otf")
+    if any(not os.path.isfile(os.path.join(fonts_dir, name)) for name in required_fonts):
+        raise RuntimeError("Bundled subtitle font is missing")
+    subtitle_filter = (
+        f"ass=filename={_ffmpeg_filter_path(ass_path)}:"
+        f"fontsdir={_ffmpeg_filter_path(fonts_dir)}"
+    )
+    container = ext.lstrip(".").lower()
+    stream_args = [
+        "-map", "[burned]", "-map", "0:a?",
+        "-map_metadata", "0", "-map_chapters", "0",
+    ]
+    if has_attached_picture and container in ("mp4", "mkv"):
+        stream_args += ["-map", "0:v:disp:attached_pic?"]
+    hardware_encoder = detect_hardware_burn_encoder(ffmpeg_path, container)
+    attempts = [hardware_encoder, None] if hardware_encoder else [None]
+    last_lines = []
+    for encoder in attempts:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        video_args = (
+            _hardware_burn_video_args(encoder, source_bitrate_kbps)
+            if encoder else _cpu_burn_video_args(container)
+        )
+        encoder_name = encoder["name"] if encoder else video_args[1]
+        encoder_args = [*video_args, *_burn_audio_args(container)]
+        if has_attached_picture and container in ("mp4", "mkv"):
+            encoder_args += ["-c:v:1", "copy", "-disposition:v:1", "attached_pic"]
+        filter_suffix = encoder.get("filter_suffix", "") if encoder else ""
+        command = [
+            ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error",
+            *(encoder.get("input_args", []) if encoder else []),
+            "-i", video_path,
+            "-filter_complex", f"[0:v:0]{subtitle_filter}{filter_suffix}[burned]",
+            *stream_args,
+            *encoder_args,
+            "-progress", "pipe:1", "-nostats", output_path,
+        ]
+        returncode, last_lines = _run_subtitle_burn_process(
+            job_id, job, command, duration, encoder_name, bool(encoder)
+        )
+        if job.get("status") == "cancelled":
+            raise RuntimeError("Subtitle burn was cancelled")
+        if returncode == 0 and os.path.isfile(output_path):
+            break
+        if encoder:
+            disable_hardware_burn_encoder(ffmpeg_path, container)
+            print(
+                f"[download] Hardware subtitle encoder {encoder_name} failed; retrying on CPU",
+                file=sys.stderr,
+                flush=True,
+            )
+    else:
+        detail = next((line for line in reversed(last_lines) if "=" not in line), "")
+        raise RuntimeError(f"Could not burn subtitle into video{': ' + detail if detail else ''}")
+    os.replace(output_path, video_path)
+    job["progress"].update({
+        "percent": 100.0,
+        "eta": None,
+        "eta_seconds": None,
+    })
+    return video_path
 
 
 @app.route("/api/info", methods=["POST"])
@@ -1551,6 +2087,7 @@ def get_info():
         "uploader": info.get("uploader", ""),
         "formats": formats,
         "has_hdr": any(f["hdr"] for f in formats),
+        "subtitle_tracks": subtitle_tracks_from_info(info),
     })
 
 
@@ -1575,6 +2112,13 @@ def start_download():
         return jsonify({"error": "Invalid video range mode"}), 400
     if preset not in VALID_PRESETS:
         return jsonify({"error": "Invalid download preset"}), 400
+    if options["subtitle_mode"] == "burn":
+        if format_choice != "video":
+            return jsonify({"error": "Burned subtitles are only available for video downloads"}), 400
+        if not options["burn_subtitle_language"]:
+            return jsonify({"error": "Select one subtitle language to burn"}), 400
+        if video_range_mode != "sdr" or options["source_is_hdr"]:
+            return jsonify({"error": "Burned subtitles currently support SDR video only"}), 400
     if format_id:
         preset = "custom"
 
