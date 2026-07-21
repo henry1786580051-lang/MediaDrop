@@ -1713,7 +1713,7 @@ def restyle_ass_file(path, width, height):
             output.append(
                 "Style: "
                 f"{name},Roboto Medium,{style['font_size']},"
-                "&H00FFFFFF,&H00FFFFFF,&H00000000,&H66000000,"
+                "&H00FFFFFF,&H00FFFFFF,&H00000000,&H4D000000,"
                 "0,0,0,0,100,100,0,0,4,"
                 f"{style['outline']},{style['background_padding']},2,"
                 f"{style['margin_l']},{style['margin_r']},"

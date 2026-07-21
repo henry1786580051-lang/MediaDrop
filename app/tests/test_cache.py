@@ -280,7 +280,7 @@ class SubtitleBurnTests(unittest.TestCase):
         self.assertIn("PlayResY: 1080", result)
         self.assertIn("Style: Default,Roboto Medium,54,&H00FFFFFF", result)
         self.assertIn("&H00000000", result)
-        self.assertIn("&H66000000", result)
+        self.assertIn("&H4D000000", result)
         self.assertIn(",4,0,6,2,", result)
         self.assertIn("Dialogue:", result)
 
