@@ -3,6 +3,8 @@ const { contextBridge, ipcRenderer, webUtils } = require("electron");
 contextBridge.exposeInMainWorld("electronAPI", {
   selectFolder: () => ipcRenderer.invoke("select-folder"),
   selectCookieFile: () => ipcRenderer.invoke("select-cookie-file"),
+  selectLocalVideo: () => ipcRenderer.invoke("select-local-video"),
+  selectLocalSubtitle: () => ipcRenderer.invoke("select-local-subtitle"),
   getPathForFile: (file) => webUtils.getPathForFile(file),
   detectProxy: () => ipcRenderer.invoke("detect-proxy"),
   showItemInFolder: (filePath) => ipcRenderer.invoke("show-item-in-folder", filePath),

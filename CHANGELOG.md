@@ -9,6 +9,7 @@
 - 烧录时会实际探测 NVIDIA NVENC、Intel Quick Sync、AMD AMF、Apple VideoToolbox 与 Linux VA-API；GPU 或驱动不可用时自动回退 CPU 编码。
 - NVIDIA NVENC 改用高质量双遍 VBR，并按源视频码率动态设置目标、峰值与缓冲区，避免无限制 CQ 让硬字幕文件异常膨胀。
 - Windows 下以 UTF-8 容错读取 FFmpeg 媒体信息，支持包含中日韩文及特殊符号的文件名。
+- 桌面应用新增本地视频与字幕烧录入口，支持 SubForge 可导出的 SRT、ASS、VTT 字幕文件，可选择 MP4、MKV 或 WebM 输出；原文件保持不变，并复用既有 SDR 校验、GPU/CPU 烧录与任务队列流程。
 
 ### 工程质量
 - 发布构建会校验 FFmpeg 的 libass 与所需编码器能力，并检查字体及其开源许可证是否完整打包。

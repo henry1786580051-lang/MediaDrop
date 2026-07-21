@@ -178,6 +178,7 @@ def job_payload(job_id, job):
     progress = job.get("progress") or empty_progress()
     return {
         "id": job_id,
+        "kind": job.get("kind", "download"),
         "status": job.get("status", "unknown"),
         "url": job.get("url", ""),
         "format": job.get("format", "video"),
@@ -1189,9 +1190,18 @@ def process_download_queue():
             active_downloads.add(job_id)
             job["status"] = "starting"
             persist_job(job_id, force=True)
-            thread = threading.Thread(
-                target=run_download,
-                args=(
+            if job.get("kind") == "local_burn":
+                target = run_local_subtitle_burn
+                args = (
+                    job_id,
+                    job.get("video_path", ""),
+                    job.get("subtitle_path", ""),
+                    job.get("container", "mp4"),
+                    job.get("title", ""),
+                )
+            else:
+                target = run_download
+                args = (
                     job_id,
                     job["url"],
                     job["format"],
@@ -1200,8 +1210,8 @@ def process_download_queue():
                     job.get("video_range_mode", "auto"),
                     job.get("preset", "recommended"),
                     job.get("options") or {},
-                ),
-            )
+                )
+            thread = threading.Thread(target=target, args=args)
             thread.daemon = True
             job["thread"] = thread
             thread.start()
@@ -1554,8 +1564,29 @@ def subtitle_tracks_from_info(info):
 
 
 SUBTITLE_EXTENSIONS = {".ass", ".srt", ".vtt", ".ttml", ".dfxp", ".srv1", ".srv2", ".srv3"}
+LOCAL_SUBTITLE_EXTENSIONS = {".ass", ".srt", ".vtt"}
+LOCAL_VIDEO_EXTENSIONS = {
+    ".mp4", ".webm", ".ogm", ".mov", ".mkv", ".avi", ".wmv", ".flv",
+    ".m4v", ".ts", ".mpg", ".mpeg", ".vob", ".asf", ".rm", ".rmvb",
+}
 hardware_encoder_cache = {}
 hardware_encoder_lock = threading.Lock()
+
+
+def validate_local_media_path(value, extensions, label):
+    """Resolve an Electron-selected local file and enforce its media type."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Select a local {label} file")
+    selected_path = os.path.expanduser(value.strip())
+    if not os.path.isabs(selected_path):
+        raise ValueError(f"Local {label} path must be absolute")
+    path = os.path.realpath(selected_path)
+    if not os.path.isfile(path):
+        raise ValueError(f"Local {label} file does not exist")
+    if os.path.splitext(path)[1].lower() not in extensions:
+        supported = ", ".join(sorted(ext.lstrip(".").upper() for ext in extensions))
+        raise ValueError(f"Unsupported local {label} format; choose {supported}")
+    return path
 
 
 def _ffmpeg_filter_path(path):
@@ -1620,6 +1651,26 @@ def probe_video_for_burn(video_path, ffmpeg_path=None):
         if bitrate_match else None
     )
     return width, height, duration, has_attached_picture, video_bitrate_kbps
+
+
+def video_is_hdr_for_burn(video_path, ffmpeg_path=None):
+    """Conservatively detect HDR signals before applying the SDR burn pipeline."""
+    ffmpeg_path = ffmpeg_path or get_ffmpeg_path()
+    result = subprocess.run(
+        [ffmpeg_path, "-hide_banner", "-i", video_path],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        env=get_ytdlp_env(),
+    )
+    output = f"{result.stderr}\n{result.stdout}"
+    return bool(re.search(
+        r"(?:smpte2084|arib-std-b67|bt2020|dolby\s+vision|\bhlg\b|\bhdr10\+?\b)",
+        output,
+        re.IGNORECASE,
+    ))
 
 
 def subtitle_style_for_resolution(width, height):
@@ -1937,7 +1988,9 @@ def _run_subtitle_burn_process(job_id, job, command, duration, encoder_name, har
     return proc.returncode, last_lines
 
 
-def burn_subtitle_into_video(job_id, job, video_path, subtitle_path, ext):
+def burn_subtitle_into_video(
+    job_id, job, video_path, subtitle_path, ext, replace_input=True
+):
     ffmpeg_path = get_ffmpeg_path()
     ensure_subtitle_ffmpeg_support(ffmpeg_path)
     width, height, duration, has_attached_picture, source_bitrate_kbps = probe_video_for_burn(
@@ -2004,13 +2057,76 @@ def burn_subtitle_into_video(job_id, job, video_path, subtitle_path, ext):
     else:
         detail = next((line for line in reversed(last_lines) if "=" not in line), "")
         raise RuntimeError(f"Could not burn subtitle into video{': ' + detail if detail else ''}")
-    os.replace(output_path, video_path)
+    if replace_input:
+        os.replace(output_path, video_path)
+        completed_path = video_path
+    else:
+        completed_path = output_path
     job["progress"].update({
         "percent": 100.0,
         "eta": None,
         "eta_seconds": None,
     })
-    return video_path
+    return completed_path
+
+
+def run_local_subtitle_burn(job_id, video_path, subtitle_path, container="mp4", title=""):
+    """Burn an external subtitle without modifying the selected source video."""
+    job = jobs[job_id]
+    download_dir = get_download_dir()
+    job_cache_dir = None
+    try:
+        video_path = validate_local_media_path(
+            video_path, LOCAL_VIDEO_EXTENSIONS, "video"
+        )
+        subtitle_path = validate_local_media_path(
+            subtitle_path, LOCAL_SUBTITLE_EXTENSIONS, "subtitle"
+        )
+        container = str(container).lower()
+        if container not in VALID_CONTAINERS:
+            raise ValueError("Invalid local burn container")
+        if video_is_hdr_for_burn(video_path):
+            raise ValueError("Burned subtitles currently support SDR video only")
+
+        ext = f".{container}"
+        job_cache_dir = get_job_cache_dir(job_id)
+        job["cache_dir"] = job_cache_dir
+        job["status"] = "downloading"
+        persist_job(job_id, force=True)
+        burned_video = burn_subtitle_into_video(
+            job_id, job, video_path, subtitle_path, ext, replace_input=False
+        )
+        source_stem = os.path.splitext(os.path.basename(video_path))[0]
+        output_title = title or f"{source_stem}-硬字幕"
+        final_path, friendly_name = finalize_cached_file(
+            burned_video, download_dir, output_title, ext, job_id
+        )
+        job["status"] = "done"
+        job["file"] = final_path
+        job["filename"] = friendly_name
+        job["progress"].update({
+            "percent": 100.0,
+            "eta": None,
+            "eta_seconds": None,
+            "phase": "complete",
+            "state": "complete",
+        })
+        job["completed_at"] = time.time()
+        persist_job(job_id, force=True)
+    except Exception as exc:
+        if job.get("status") != "cancelled":
+            job["status"] = "error"
+            job["error"] = str(exc)
+            persist_job(job_id, force=True)
+    finally:
+        if job.get("status") in ("done", "error", "cancelled", "missing"):
+            persist_job(job_id, force=True)
+        if job_cache_dir and job.get("status") != "interrupted":
+            cleanup_job_cache(job_cache_dir)
+        with queue_lock:
+            active_downloads.discard(job_id)
+        if not shutdown_event.is_set():
+            process_download_queue()
 
 
 @app.route("/api/info", methods=["POST"])
@@ -2147,6 +2263,46 @@ def start_download():
     return jsonify({"job_id": job_id})
 
 
+@app.route("/api/local-burn", methods=["POST"])
+def start_local_subtitle_burn():
+    data = request.get_json(silent=True) or {}
+    try:
+        video_path = validate_local_media_path(
+            data.get("video_path"), LOCAL_VIDEO_EXTENSIONS, "video"
+        )
+        subtitle_path = validate_local_media_path(
+            data.get("subtitle_path"), LOCAL_SUBTITLE_EXTENSIONS, "subtitle"
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    container = str(data.get("container", "mp4")).lower()
+    if container not in VALID_CONTAINERS:
+        return jsonify({"error": "Invalid local burn container"}), 400
+
+    cleanup_old_jobs()
+    job_id = f"local_burn_{time.time_ns()}_{uuid.uuid4().hex[:8]}"
+    source_stem = os.path.splitext(os.path.basename(video_path))[0]
+    jobs[job_id] = {
+        "kind": "local_burn",
+        "status": "queued",
+        "url": "",
+        "format": "video",
+        "video_path": video_path,
+        "subtitle_path": subtitle_path,
+        "container": container,
+        "title": f"{source_stem}-硬字幕",
+        "preset": "local",
+        "options": {"subtitle_mode": "burn", "container": container},
+        "progress": empty_progress(),
+        "created_at": time.time(),
+    }
+    persist_job(job_id, force=True)
+    with queue_lock:
+        download_queue.append(job_id)
+    process_download_queue()
+    return jsonify({"job_id": job_id})
+
+
 @app.route("/api/status/<job_id>")
 def check_status(job_id):
     job = jobs.get(job_id)
@@ -2269,6 +2425,7 @@ def retry_job(job_id):
         return jsonify({"error": "Task cannot be retried"}), 400
     new_id = f"retry_{time.time_ns()}_{uuid.uuid4().hex[:8]}"
     jobs[new_id] = {
+        "kind": source.get("kind", "download"),
         "status": "queued",
         "url": source.get("url", ""),
         "format": source.get("format", "video"),
@@ -2280,6 +2437,12 @@ def retry_job(job_id):
         "progress": empty_progress(),
         "created_at": time.time(),
     }
+    if source.get("kind") == "local_burn":
+        jobs[new_id].update({
+            "video_path": source.get("video_path", ""),
+            "subtitle_path": source.get("subtitle_path", ""),
+            "container": source.get("container", "mp4"),
+        })
     persist_job(new_id, force=True)
     with queue_lock:
         download_queue.append(new_id)

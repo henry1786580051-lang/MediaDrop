@@ -49,5 +49,11 @@ assert(pyinstallerSpec.includes("('fonts', 'fonts')"), "PyInstaller no longer bu
 const buildWorkflow = fs.readFileSync(path.join(__dirname, "..", ".github", "workflows", "build.yml"), "utf8");
 assert(buildWorkflow.includes("Roboto-OFL.txt"), "Release builds no longer verify the Roboto license");
 assert(buildWorkflow.includes("NotoSansCJK-OFL.txt"), "Release builds no longer verify the Noto license");
+const mainSource = fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8");
+const preloadSource = fs.readFileSync(path.join(__dirname, "..", "preload.js"), "utf8");
+assert(mainSource.includes('ipcMain.handle("select-local-video"'), "Local video picker IPC is missing");
+assert(mainSource.includes('extensions: ["srt", "ass", "vtt"]'), "SubForge subtitle picker formats changed");
+assert(preloadSource.includes("selectLocalVideo"), "Local video picker is not exposed to the renderer");
+assert(preloadSource.includes("selectLocalSubtitle"), "Local subtitle picker is not exposed to the renderer");
 
 console.log("electron utility checks OK");

@@ -139,6 +139,41 @@
       letter-spacing: 0;
     }
 
+    .local-burn {
+      margin: 0 0 24px;
+      padding: 14px 16px;
+      border: 1.5px solid var(--card-border);
+      border-radius: var(--radius);
+      background: var(--card);
+    }
+    .local-burn summary { cursor: pointer; font-size: 0.78rem; font-weight: 700; color: var(--fg); }
+    .local-burn-body { margin-top: 14px; }
+    .local-burn-help { margin: 0 0 12px; color: var(--muted); font-size: 0.69rem; line-height: 1.5; }
+    .local-burn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .local-file-field { min-width: 0; }
+    .local-file-field > span { display: block; margin-bottom: 6px; color: var(--muted); font-size: 0.68rem; }
+    .local-file-control { display: flex; gap: 7px; }
+    .local-file-control input,
+    .local-burn-actions select {
+      min-width: 0;
+      flex: 1;
+      height: 36px;
+      padding: 0 10px;
+      border: 1px solid var(--card-border);
+      border-radius: 7px;
+      background: var(--soft);
+      color: var(--fg);
+      font: 0.7rem/1.2 'DM Mono', monospace;
+    }
+    .local-file-control input { text-overflow: ellipsis; }
+    .local-file-control button { min-width: 62px; }
+    .local-burn-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+    .local-burn-actions select { max-width: 112px; }
+    .local-burn-actions .primary-btn { min-width: 112px; }
+    .local-burn-status { min-width: 0; color: var(--muted); font-size: 0.69rem; }
+    .local-burn-status.error { color: var(--error); }
+    .local-burn-status.ok { color: var(--success); }
+
     .controls {
       display: flex;
       gap: 10px;
@@ -582,6 +617,7 @@
     .secondary-btn:hover { background: var(--soft); border-color: #bdc2bb; }
     .primary-btn { border: 1px solid var(--fg); background: var(--fg); color: #fff; }
     .primary-btn:hover { background: #181a18; }
+    .primary-btn:disabled { opacity: 0.45; cursor: not-allowed; }
     .field-help { margin-top: 7px; color: var(--muted); font-size: 0.69rem; line-height: 1.45; }
     .settings-drop.drag-over input { border-color: var(--accent); background: rgba(232, 93, 42, 0.04); }
     .conditional-field[hidden] { display: none; }
@@ -646,6 +682,10 @@
       .settings-launcher .label { display: none; }
       .url-composer { grid-template-columns: 1fr; }
       .url-composer .fetch-btn { min-height: 44px; }
+      .local-burn-grid { grid-template-columns: 1fr; }
+      .local-burn-actions { align-items: stretch; flex-wrap: wrap; }
+      .local-burn-actions select { max-width: none; }
+      .local-burn-status { width: 100%; }
       .card { flex-direction: column; gap: 10px; }
       .card-thumb {
         width: 100%;
@@ -689,6 +729,28 @@
       <button class="fetch-btn" id="goBtn" onclick="go()">解析链接</button>
     </div>
     <p class="hint">多个链接可使用空格、逗号或换行分隔。</p>
+
+    <details class="local-burn">
+      <summary>本地视频 + 字幕烧录</summary>
+      <div class="local-burn-body">
+        <p class="local-burn-help">选择本地视频和 SubForge 可导出的 SRT、ASS 或 VTT 字幕，沿用相同的动态字幕样式、GPU 探测与 CPU 回退流程。当前仅支持 SDR，原文件不会被修改。</p>
+        <div class="local-burn-grid">
+          <label class="local-file-field">
+            <span>本地视频</span>
+            <span class="local-file-control"><input id="localVideoPath" type="text" readonly placeholder="请选择视频文件"><button class="secondary-btn" type="button" onclick="browseLocalVideo()">选择</button></span>
+          </label>
+          <label class="local-file-field">
+            <span>字幕文件（SRT / ASS / VTT）</span>
+            <span class="local-file-control"><input id="localSubtitlePath" type="text" readonly placeholder="请选择字幕文件"><button class="secondary-btn" type="button" onclick="browseLocalSubtitle()">选择</button></span>
+          </label>
+        </div>
+        <div class="local-burn-actions">
+          <select id="localBurnContainer" aria-label="输出封装"><option value="mp4">输出 MP4</option><option value="mkv">输出 MKV</option><option value="webm">输出 WebM</option></select>
+          <button class="primary-btn" id="localBurnBtn" type="button" onclick="startLocalBurn()">开始烧录</button>
+          <span class="local-burn-status" id="localBurnStatus" role="status" aria-live="polite"></span>
+        </div>
+      </div>
+    </details>
 
     <div id="cards" class="cards"></div>
     <section id="taskCenter" class="task-center" hidden>
@@ -970,6 +1032,67 @@
       if (file) {
         document.getElementById('cookiesFile').value = file;
         await saveCookieFile();
+      }
+    }
+
+    function setLocalBurnStatus(kind, message) {
+      const status = document.getElementById('localBurnStatus');
+      status.className = `local-burn-status ${kind || ''}`;
+      status.textContent = message || '';
+    }
+
+    async function browseLocalVideo() {
+      if (!window.electronAPI?.selectLocalVideo) {
+        setLocalBurnStatus('error', '本地文件选择仅可在桌面应用中使用');
+        return;
+      }
+      const file = await window.electronAPI.selectLocalVideo();
+      if (file) {
+        document.getElementById('localVideoPath').value = file;
+        setLocalBurnStatus('', '');
+      }
+    }
+
+    async function browseLocalSubtitle() {
+      if (!window.electronAPI?.selectLocalSubtitle) {
+        setLocalBurnStatus('error', '本地文件选择仅可在桌面应用中使用');
+        return;
+      }
+      const file = await window.electronAPI.selectLocalSubtitle();
+      if (file) {
+        document.getElementById('localSubtitlePath').value = file;
+        setLocalBurnStatus('', '');
+      }
+    }
+
+    async function startLocalBurn() {
+      const videoPath = document.getElementById('localVideoPath').value;
+      const subtitlePath = document.getElementById('localSubtitlePath').value;
+      const button = document.getElementById('localBurnBtn');
+      if (!videoPath || !subtitlePath) {
+        setLocalBurnStatus('error', '请同时选择视频和字幕文件');
+        return;
+      }
+      button.disabled = true;
+      setLocalBurnStatus('', '正在创建烧录任务...');
+      try {
+        const response = await fetch('/api/local-burn', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            video_path: videoPath,
+            subtitle_path: subtitlePath,
+            container: document.getElementById('localBurnContainer').value,
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || 'Could not start local subtitle burn');
+        setLocalBurnStatus('ok', '任务已加入队列，可在任务中心查看进度');
+        await refreshTaskCenter();
+      } catch (error) {
+        setLocalBurnStatus('error', friendlyError(error.message));
+      } finally {
+        button.disabled = false;
       }
     }
 
@@ -1316,6 +1439,14 @@
       if (err.includes('Bundled subtitle font is missing')) return '应用缺少硬字幕字体文件';
       if (err.includes('Could not convert subtitle for burning')) return '无法转换所选字幕';
       if (err.includes('Could not burn subtitle into video')) return '无法将字幕烧录到视频画面';
+      if (err.includes('Select a local video file')) return '请选择本地视频文件';
+      if (err.includes('Select a local subtitle file')) return '请选择本地字幕文件';
+      if (err.includes('Local video file does not exist')) return '所选本地视频不存在或无法访问';
+      if (err.includes('Local subtitle file does not exist')) return '所选字幕文件不存在或无法访问';
+      if (err.includes('Unsupported local video format')) return '不支持所选视频格式';
+      if (err.includes('Unsupported local subtitle format')) return '字幕仅支持 SRT、ASS 或 VTT';
+      if (err.includes('Invalid local burn container')) return '本地烧录输出格式无效';
+      if (err.includes('Could not start local subtitle burn')) return '无法创建本地字幕烧录任务';
       if (err.includes('Job not found')) return '未找到下载任务';
       if (err.includes('File not ready')) return '文件尚未准备完成';
       if (err.includes('Access denied')) return '没有权限访问该文件';
@@ -1824,6 +1955,15 @@
       queued: '等待中', starting: '正在启动', downloading: '下载中', paused: '已暂停',
       interrupted: '恢复中', done: '已完成', error: '失败', cancelled: '已取消', missing: '文件已移动'
     };
+
+    function taskStatusLabel(task) {
+      if (task.kind === 'local_burn') {
+        if (task.status === 'starting') return '正在准备本地文件';
+        if (task.status === 'downloading') return '正在烧录字幕';
+        if (task.status === 'paused') return '烧录已暂停';
+      }
+      return taskStatusLabels[task.status] || task.status;
+    }
     let taskCenterInitialized = false;
 
     async function taskAction(id, action, extra = {}) {
@@ -1882,7 +2022,7 @@
         document.getElementById('taskList').innerHTML = tasks.map(task => {
           const percent = Number.isFinite(task.progress?.percent) ? ` · ${task.progress.percent.toFixed(1)}%` : '';
           const detail = task.error ? ` · ${esc(friendlyError(task.error))}` : '';
-          return `<div class="task-row"><div><div class="task-title">${esc(task.title || task.filename || '未命名任务')}</div><div class="task-meta">${taskStatusLabels[task.status] || task.status} · ${(task.format || 'video').toUpperCase()}${percent}${detail}</div></div><div class="task-actions">${taskButtons(task)}</div></div>`;
+          return `<div class="task-row"><div><div class="task-title">${esc(task.title || task.filename || '未命名任务')}</div><div class="task-meta">${taskStatusLabel(task)} · ${(task.format || 'video').toUpperCase()}${percent}${detail}</div></div><div class="task-actions">${taskButtons(task)}</div></div>`;
         }).join('');
         if (taskCenterInitialized) {
           tasks.filter(task => task.status === 'done' && !notifiedJobs.has(task.id)).forEach(task => {

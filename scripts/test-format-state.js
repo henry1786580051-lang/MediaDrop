@@ -12,6 +12,12 @@ const source = scriptMatch[1];
 if (/setInterval\s*\(\s*async/.test(source)) {
   throw new Error("Async interval polling can overlap and apply stale responses");
 }
+if (!source.includes("fetch('/api/local-burn'")) {
+  throw new Error("Local subtitle burn action is missing");
+}
+if (!source.includes("selectLocalVideo") || !source.includes("selectLocalSubtitle")) {
+  throw new Error("Local media pickers are not wired into the page");
+}
 const start = source.indexOf("function buildDownloadRequest");
 const end = source.indexOf("function parseUrls", start);
 if (start < 0 || end < 0) throw new Error("Download state helpers were not found");

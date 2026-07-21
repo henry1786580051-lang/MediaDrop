@@ -250,6 +250,13 @@ class SubtitleBurnTests(unittest.TestCase):
             "replace",
         )
 
+    def test_hdr_probe_recognizes_pq_and_keeps_sdr_unblocked(self):
+        hdr = mock.Mock(stdout="", stderr="Video: hevc, yuv420p10le(tv, bt2020nc/bt2020/smpte2084)")
+        sdr = mock.Mock(stdout="", stderr="Video: h264, yuv420p(tv, bt709)")
+        with mock.patch.object(server.subprocess, "run", side_effect=[hdr, sdr]):
+            self.assertTrue(server.video_is_hdr_for_burn("hdr.mp4", "ffmpeg"))
+            self.assertFalse(server.video_is_hdr_for_burn("sdr.mp4", "ffmpeg"))
+
     def test_ass_restyling_uses_white_text_background_and_video_resolution(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ass_path = pathlib.Path(temp_dir) / "subtitle.ass"
@@ -392,6 +399,28 @@ class SubtitleBurnTests(unittest.TestCase):
             server.find_downloaded_subtitle(files, "zh-Hans"),
             "job.zh-Hans.srt",
         )
+
+    def test_local_subtitle_formats_match_subforge_exports(self):
+        self.assertEqual(server.LOCAL_SUBTITLE_EXTENSIONS, {".srt", ".ass", ".vtt"})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle = pathlib.Path(temp_dir) / "字幕.VTT"
+            subtitle.write_text("WEBVTT\n", encoding="utf-8")
+            self.assertEqual(
+                server.validate_local_media_path(
+                    str(subtitle), server.LOCAL_SUBTITLE_EXTENSIONS, "subtitle"
+                ),
+                os.path.realpath(subtitle),
+            )
+            unsupported = pathlib.Path(temp_dir) / "subtitle.txt"
+            unsupported.write_text("plain text", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Unsupported local subtitle format"):
+                server.validate_local_media_path(
+                    str(unsupported), server.LOCAL_SUBTITLE_EXTENSIONS, "subtitle"
+                )
+            with self.assertRaisesRegex(ValueError, "path must be absolute"):
+                server.validate_local_media_path(
+                    "subtitle.srt", server.LOCAL_SUBTITLE_EXTENSIONS, "subtitle"
+                )
 
 
 class CacheLifecycleTests(unittest.TestCase):
@@ -680,6 +709,67 @@ class CacheLifecycleTests(unittest.TestCase):
         self.assertEqual(os.listdir(server.get_cache_root()), [])
         self.assertNotIn("success", server.active_downloads)
 
+    def test_local_burn_preserves_source_and_uses_shared_pipeline(self):
+        video = pathlib.Path(self.temp_dir.name) / "本地视频.mov"
+        subtitle = pathlib.Path(self.temp_dir.name) / "SubForge字幕.ass"
+        video.write_bytes(b"original-video")
+        subtitle.write_text("[Script Info]\n", encoding="utf-8")
+        server.jobs["local"] = {
+            "kind": "local_burn",
+            "status": "starting",
+            "progress": server.empty_progress(),
+        }
+        server.active_downloads.add("local")
+
+        def fake_burn(
+            _job_id, _job, selected_video, selected_subtitle, ext, replace_input=True
+        ):
+            self.assertEqual(os.path.realpath(selected_video), os.path.realpath(video))
+            self.assertEqual(selected_subtitle, os.path.realpath(subtitle))
+            self.assertEqual(ext, ".mp4")
+            self.assertFalse(replace_input)
+            output = pathlib.Path(_job["cache_dir"]) / "local.burned.mp4"
+            output.write_bytes(b"burned-video")
+            return str(output)
+
+        with mock.patch.object(server, "get_download_dir", return_value=self.download_dir), \
+             mock.patch.object(server, "video_is_hdr_for_burn", return_value=False), \
+             mock.patch.object(server, "burn_subtitle_into_video", side_effect=fake_burn) as burn:
+            server.run_local_subtitle_burn(
+                "local", str(video), str(subtitle), "mp4", "本地视频-硬字幕"
+            )
+
+        job = server.jobs["local"]
+        burn.assert_called_once()
+        self.assertEqual(video.read_bytes(), b"original-video")
+        self.assertEqual(pathlib.Path(job["file"]).read_bytes(), b"burned-video")
+        self.assertEqual(job["filename"], "本地视频-硬字幕.mp4")
+        self.assertEqual(job["status"], "done")
+        self.assertNotIn("local", server.active_downloads)
+        self.assertEqual(os.listdir(server.get_cache_root()), [])
+
+    def test_local_burn_rejects_hdr_before_starting_encoder(self):
+        video = pathlib.Path(self.temp_dir.name) / "hdr.mp4"
+        subtitle = pathlib.Path(self.temp_dir.name) / "subtitle.srt"
+        video.write_bytes(b"hdr-video")
+        subtitle.write_text("subtitle", encoding="utf-8")
+        server.jobs["local-hdr"] = {
+            "kind": "local_burn",
+            "status": "starting",
+            "progress": server.empty_progress(),
+        }
+        server.active_downloads.add("local-hdr")
+        with mock.patch.object(server, "get_download_dir", return_value=self.download_dir), \
+             mock.patch.object(server, "video_is_hdr_for_burn", return_value=True), \
+             mock.patch.object(server, "burn_subtitle_into_video") as burn:
+            server.run_local_subtitle_burn(
+                "local-hdr", str(video), str(subtitle), "mp4", "HDR"
+            )
+
+        self.assertEqual(server.jobs["local-hdr"]["status"], "error")
+        self.assertIn("SDR", server.jobs["local-hdr"]["error"])
+        burn.assert_not_called()
+
     def test_hdr_preset_and_advanced_options_reach_ytdlp(self):
         captured = []
 
@@ -923,6 +1013,38 @@ class PersistenceAndApiTests(unittest.TestCase):
         self.assertEqual(job["options"]["subtitle_mode"], "burn")
         self.assertEqual(job["options"]["burn_subtitle_language"], "zh-Hans")
 
+    def test_local_burn_api_validates_and_queues_subforge_files(self):
+        video = pathlib.Path(self.temp_dir.name) / "input.mkv"
+        subtitle = pathlib.Path(self.temp_dir.name) / "input.srt"
+        video.write_bytes(b"video")
+        subtitle.write_text("1\n00:00:00,000 --> 00:00:01,000\n字幕\n", encoding="utf-8")
+        client = server.app.test_client()
+
+        with mock.patch.object(server, "process_download_queue") as process_queue:
+            response = client.post("/api/local-burn", json={
+                "video_path": str(video),
+                "subtitle_path": str(subtitle),
+                "container": "mp4",
+            })
+
+        self.assertEqual(response.status_code, 200)
+        process_queue.assert_called_once()
+        job = server.jobs[response.get_json()["job_id"]]
+        self.assertEqual(job["kind"], "local_burn")
+        self.assertEqual(job["video_path"], os.path.realpath(video))
+        self.assertEqual(job["subtitle_path"], os.path.realpath(subtitle))
+        self.assertIn(response.get_json()["job_id"], server.download_queue)
+
+        bad_subtitle = pathlib.Path(self.temp_dir.name) / "input.txt"
+        bad_subtitle.write_text("no timeline", encoding="utf-8")
+        rejected = client.post("/api/local-burn", json={
+            "video_path": str(video),
+            "subtitle_path": str(bad_subtitle),
+            "container": "mp4",
+        })
+        self.assertEqual(rejected.status_code, 400)
+        self.assertIn("Unsupported local subtitle format", rejected.get_json()["error"])
+
     def test_reorder_queue_returns_without_reacquiring_the_queue_lock(self):
         server.download_queue.extend(["first", "second"])
         client = server.app.test_client()
@@ -950,6 +1072,20 @@ class PersistenceAndApiTests(unittest.TestCase):
         self.assertEqual(server.jobs[new_id]["format"], "audio")
         self.assertEqual(client.delete("/api/jobs/old").status_code, 200)
         self.assertNotIn("old", server.jobs)
+
+        server.jobs["local-old"] = {
+            "kind": "local_burn", "status": "error", "url": "", "format": "video",
+            "title": "Local", "video_path": "C:/video.mp4",
+            "subtitle_path": "C:/subtitle.srt", "container": "mkv",
+            "progress": server.empty_progress(), "created_at": 2,
+        }
+        with mock.patch.object(server, "process_download_queue"):
+            retried_local = client.post("/api/jobs/local-old/retry")
+        local_job = server.jobs[retried_local.get_json()["job_id"]]
+        self.assertEqual(local_job["kind"], "local_burn")
+        self.assertEqual(local_job["video_path"], "C:/video.mp4")
+        self.assertEqual(local_job["subtitle_path"], "C:/subtitle.srt")
+        self.assertEqual(local_job["container"], "mkv")
 
     def test_ytdlp_checksum_failure_preserves_current_binary(self):
         tools = pathlib.Path(self.base_dir) / "tools"

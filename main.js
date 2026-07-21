@@ -494,6 +494,36 @@ ipcMain.handle("select-cookie-file", async () => {
   return result.filePaths[0];
 });
 
+ipcMain.handle("select-local-video", async () => {
+  const result = await dialog.showOpenDialog(mainWindow || undefined, {
+    properties: ["openFile"],
+    filters: [
+      {
+        name: "视频文件",
+        extensions: [
+          "mp4", "webm", "ogm", "mov", "mkv", "avi", "wmv", "flv",
+          "m4v", "ts", "mpg", "mpeg", "vob", "asf", "rm", "rmvb",
+        ],
+      },
+      { name: "所有文件", extensions: ["*"] },
+    ],
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
+});
+
+ipcMain.handle("select-local-subtitle", async () => {
+  const result = await dialog.showOpenDialog(mainWindow || undefined, {
+    properties: ["openFile"],
+    filters: [
+      { name: "字幕文件", extensions: ["srt", "ass", "vtt"] },
+      { name: "所有文件", extensions: ["*"] },
+    ],
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
+});
+
 ipcMain.handle("detect-proxy", () => {
   const url = detectProxy();
   return url || "";
