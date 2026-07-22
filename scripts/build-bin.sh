@@ -36,3 +36,10 @@ chmod +x "$BUNDLED_BIN/mediadrop-server" "$BUNDLED_BIN/yt-dlp" "$BUNDLED_BIN/ffm
 
 "$BUNDLED_BIN/yt-dlp" --version
 "$BUNDLED_BIN/ffmpeg" -version >/dev/null
+"$BUNDLED_BIN/ffmpeg" -hide_banner -filters 2>&1 | grep -E ' (ass|subtitles) '
+"$BUNDLED_BIN/ffmpeg" -hide_banner -encoders 2>&1 | grep -E 'libx264|libvpx-vp9'
+"$BUNDLED_BIN/ffmpeg" -hide_banner -encoders 2>&1 | grep 'h264_videotoolbox'
+test -f "$BUNDLED_BIN/_internal/fonts/Roboto-Medium.ttf"
+test -f "$BUNDLED_BIN/_internal/fonts/NotoSansCJKsc-Regular.otf"
+test -f "$BUNDLED_BIN/_internal/fonts/Roboto-OFL.txt"
+test -f "$BUNDLED_BIN/_internal/fonts/NotoSansCJK-OFL.txt"

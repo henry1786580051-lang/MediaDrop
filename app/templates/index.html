@@ -139,6 +139,41 @@
       letter-spacing: 0;
     }
 
+    .local-burn {
+      margin: 0 0 24px;
+      padding: 14px 16px;
+      border: 1.5px solid var(--card-border);
+      border-radius: var(--radius);
+      background: var(--card);
+    }
+    .local-burn summary { cursor: pointer; font-size: 0.78rem; font-weight: 700; color: var(--fg); }
+    .local-burn-body { margin-top: 14px; }
+    .local-burn-help { margin: 0 0 12px; color: var(--muted); font-size: 0.69rem; line-height: 1.5; }
+    .local-burn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .local-file-field { min-width: 0; }
+    .local-file-field > span { display: block; margin-bottom: 6px; color: var(--muted); font-size: 0.68rem; }
+    .local-file-control { display: flex; gap: 7px; }
+    .local-file-control input,
+    .local-burn-actions select {
+      min-width: 0;
+      flex: 1;
+      height: 36px;
+      padding: 0 10px;
+      border: 1px solid var(--card-border);
+      border-radius: 7px;
+      background: var(--soft);
+      color: var(--fg);
+      font: 0.7rem/1.2 'DM Mono', monospace;
+    }
+    .local-file-control input { text-overflow: ellipsis; }
+    .local-file-control button { min-width: 62px; }
+    .local-burn-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+    .local-burn-actions select { max-width: 112px; }
+    .local-burn-actions .primary-btn { min-width: 112px; }
+    .local-burn-status { min-width: 0; color: var(--muted); font-size: 0.69rem; }
+    .local-burn-status.error { color: var(--error); }
+    .local-burn-status.ok { color: var(--success); }
+
     .controls {
       display: flex;
       gap: 10px;
@@ -377,6 +412,7 @@
     .advanced-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; margin-top: 9px; }
     .advanced-grid label { color: var(--muted); font-size: 0.68rem; }
     .advanced-grid .select-field, .advanced-grid .text-field { display: grid; grid-template-columns: 54px minmax(0, 1fr); align-items: center; gap: 7px; }
+    .advanced-grid .field-help { grid-column: 2; margin-top: 0; }
     .advanced-grid .check-field { display: flex; align-items: center; gap: 6px; min-height: 30px; }
     .advanced-grid select, .advanced-grid input[type="text"] { min-width: 0; width: 100%; height: 30px; border: 1px solid var(--card-border); border-radius: 6px; background: var(--soft); color: var(--fg); padding: 0 7px; }
 
@@ -581,6 +617,7 @@
     .secondary-btn:hover { background: var(--soft); border-color: #bdc2bb; }
     .primary-btn { border: 1px solid var(--fg); background: var(--fg); color: #fff; }
     .primary-btn:hover { background: #181a18; }
+    .primary-btn:disabled { opacity: 0.45; cursor: not-allowed; }
     .field-help { margin-top: 7px; color: var(--muted); font-size: 0.69rem; line-height: 1.45; }
     .settings-drop.drag-over input { border-color: var(--accent); background: rgba(232, 93, 42, 0.04); }
     .conditional-field[hidden] { display: none; }
@@ -645,6 +682,10 @@
       .settings-launcher .label { display: none; }
       .url-composer { grid-template-columns: 1fr; }
       .url-composer .fetch-btn { min-height: 44px; }
+      .local-burn-grid { grid-template-columns: 1fr; }
+      .local-burn-actions { align-items: stretch; flex-wrap: wrap; }
+      .local-burn-actions select { max-width: none; }
+      .local-burn-status { width: 100%; }
       .card { flex-direction: column; gap: 10px; }
       .card-thumb {
         width: 100%;
@@ -688,6 +729,28 @@
       <button class="fetch-btn" id="goBtn" onclick="go()">解析链接</button>
     </div>
     <p class="hint">多个链接可使用空格、逗号或换行分隔。</p>
+
+    <details class="local-burn">
+      <summary>本地视频 + 字幕烧录</summary>
+      <div class="local-burn-body">
+        <p class="local-burn-help">选择本地视频和 SubForge 可导出的 SRT、ASS 或 VTT 字幕，沿用相同的动态字幕样式、GPU 探测与 CPU 回退流程。当前仅支持 SDR，原文件不会被修改。</p>
+        <div class="local-burn-grid">
+          <label class="local-file-field">
+            <span>本地视频</span>
+            <span class="local-file-control"><input id="localVideoPath" type="text" readonly placeholder="请选择视频文件"><button class="secondary-btn" type="button" onclick="browseLocalVideo()">选择</button></span>
+          </label>
+          <label class="local-file-field">
+            <span>字幕文件（SRT / ASS / VTT）</span>
+            <span class="local-file-control"><input id="localSubtitlePath" type="text" readonly placeholder="请选择字幕文件"><button class="secondary-btn" type="button" onclick="browseLocalSubtitle()">选择</button></span>
+          </label>
+        </div>
+        <div class="local-burn-actions">
+          <select id="localBurnContainer" aria-label="输出封装"><option value="mp4">输出 MP4</option><option value="mkv">输出 MKV</option><option value="webm">输出 WebM</option></select>
+          <button class="primary-btn" id="localBurnBtn" type="button" onclick="startLocalBurn()">开始烧录</button>
+          <span class="local-burn-status" id="localBurnStatus" role="status" aria-live="polite"></span>
+        </div>
+      </div>
+    </details>
 
     <div id="cards" class="cards"></div>
     <section id="taskCenter" class="task-center" hidden>
@@ -972,6 +1035,67 @@
       }
     }
 
+    function setLocalBurnStatus(kind, message) {
+      const status = document.getElementById('localBurnStatus');
+      status.className = `local-burn-status ${kind || ''}`;
+      status.textContent = message || '';
+    }
+
+    async function browseLocalVideo() {
+      if (!window.electronAPI?.selectLocalVideo) {
+        setLocalBurnStatus('error', '本地文件选择仅可在桌面应用中使用');
+        return;
+      }
+      const file = await window.electronAPI.selectLocalVideo();
+      if (file) {
+        document.getElementById('localVideoPath').value = file;
+        setLocalBurnStatus('', '');
+      }
+    }
+
+    async function browseLocalSubtitle() {
+      if (!window.electronAPI?.selectLocalSubtitle) {
+        setLocalBurnStatus('error', '本地文件选择仅可在桌面应用中使用');
+        return;
+      }
+      const file = await window.electronAPI.selectLocalSubtitle();
+      if (file) {
+        document.getElementById('localSubtitlePath').value = file;
+        setLocalBurnStatus('', '');
+      }
+    }
+
+    async function startLocalBurn() {
+      const videoPath = document.getElementById('localVideoPath').value;
+      const subtitlePath = document.getElementById('localSubtitlePath').value;
+      const button = document.getElementById('localBurnBtn');
+      if (!videoPath || !subtitlePath) {
+        setLocalBurnStatus('error', '请同时选择视频和字幕文件');
+        return;
+      }
+      button.disabled = true;
+      setLocalBurnStatus('', '正在创建烧录任务...');
+      try {
+        const response = await fetch('/api/local-burn', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            video_path: videoPath,
+            subtitle_path: subtitlePath,
+            container: document.getElementById('localBurnContainer').value,
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || 'Could not start local subtitle burn');
+        setLocalBurnStatus('ok', '任务已加入队列，可在任务中心查看进度');
+        await refreshTaskCenter();
+      } catch (error) {
+        setLocalBurnStatus('error', friendlyError(error.message));
+      } finally {
+        button.disabled = false;
+      }
+    }
+
     function setSettingsMsg(kind, message, autoClear = false) {
       const msg = document.getElementById('settingsMsg');
       clearTimeout(settingsMessageTimer);
@@ -1155,11 +1279,14 @@
       return `${secs} 秒`;
     }
 
-    function progressPhaseLabel(phase) {
+    function progressPhaseLabel(phase, progress = {}) {
       const labels = {
         merging: '正在合并音视频',
         converting_audio: '正在转换 MP3',
         converting_thumbnail: '正在转换封面',
+        burning_subtitles: progress.hardware_accelerated
+          ? '正在使用 GPU 将字幕烧录到视频画面'
+          : '正在使用 CPU 将字幕烧录到视频画面',
         postprocessing: '正在处理媒体',
         complete: '处理完成',
       };
@@ -1168,7 +1295,7 @@
 
     function fmtEtaEstimate(progress, isPaused) {
       if (isPaused || progress.state === 'paused') return '估算已暂停';
-      const phaseLabel = progressPhaseLabel(progress.phase);
+      const phaseLabel = progressPhaseLabel(progress.phase, progress);
       if (phaseLabel) return phaseLabel;
       if (progress.state === 'stalled') return '网络波动，正在重新估算';
 
@@ -1203,10 +1330,14 @@
       const options = card.options || {};
       let requestOptions = {};
       if (format === 'video') {
+        const selectedFormat = (card.formats || []).find(item => item.id === card.selectedFormatId);
         requestOptions = {
           container: options.container || 'mp4',
-          subtitles: Boolean(options.subtitles),
+          subtitle_mode: options.subtitle_mode || (options.subtitles ? 'embed' : 'none'),
+          subtitles: (options.subtitle_mode || (options.subtitles ? 'embed' : 'none')) === 'embed',
           subtitle_languages: options.subtitle_languages || 'zh.*,en.*',
+          burn_subtitle_language: options.burn_subtitle_language || '',
+          source_is_hdr: Boolean(selectedFormat?.hdr),
           metadata: Boolean(options.metadata),
           chapters: Boolean(options.chapters),
           embed_thumbnail: Boolean(options.embed_thumbnail),
@@ -1301,6 +1432,21 @@
       if (err.includes('No URL provided')) return '请先输入媒体链接';
       if (err.includes('Invalid URL')) return '链接格式无效';
       if (err.includes('Invalid video range mode')) return '动态范围选项无效';
+      if (err.includes('Select one subtitle language to burn')) return '请选择一种要烧录到画面的字幕语言';
+      if (err.includes('Burned subtitles currently support SDR video only')) return '硬字幕当前仅支持 SDR 视频';
+      if (err.includes('Selected subtitle language was not downloaded')) return '没有下载到所选语种的字幕';
+      if (err.includes('does not include libass')) return '内置 FFmpeg 不支持字幕渲染';
+      if (err.includes('Bundled subtitle font is missing')) return '应用缺少硬字幕字体文件';
+      if (err.includes('Could not convert subtitle for burning')) return '无法转换所选字幕';
+      if (err.includes('Could not burn subtitle into video')) return '无法将字幕烧录到视频画面';
+      if (err.includes('Select a local video file')) return '请选择本地视频文件';
+      if (err.includes('Select a local subtitle file')) return '请选择本地字幕文件';
+      if (err.includes('Local video file does not exist')) return '所选本地视频不存在或无法访问';
+      if (err.includes('Local subtitle file does not exist')) return '所选字幕文件不存在或无法访问';
+      if (err.includes('Unsupported local video format')) return '不支持所选视频格式';
+      if (err.includes('Unsupported local subtitle format')) return '字幕仅支持 SRT、ASS 或 VTT';
+      if (err.includes('Invalid local burn container')) return '本地烧录输出格式无效';
+      if (err.includes('Could not start local subtitle burn')) return '无法创建本地字幕烧录任务';
       if (err.includes('Job not found')) return '未找到下载任务';
       if (err.includes('File not ready')) return '文件尚未准备完成';
       if (err.includes('Access denied')) return '没有权限访问该文件';
@@ -1359,10 +1505,17 @@
               uploader: data.uploader || '',
               formats: data.formats || [],
               hasHdr: Boolean(data.has_hdr),
+              subtitleTracks: data.subtitle_tracks || [],
               videoRangeMode: 'auto',
               selectedFormatId: null,
               preset: 'recommended',
-              options: { container: 'mp4', audio_quality: '192', subtitle_languages: 'zh.*,en.*' },
+              options: {
+                container: 'mp4',
+                audio_quality: '192',
+                subtitle_mode: 'none',
+                subtitle_languages: 'zh.*,en.*',
+                burn_subtitle_language: '',
+              },
               completedDownloads: {},
             };
           }
@@ -1449,9 +1602,10 @@
       </div>`;
 
       const rangeMode = c.videoRangeMode || 'auto';
+      const burnsSubtitles = (c.options?.subtitle_mode || 'none') === 'burn';
       const rangePills = `<div class="range-pills">
-        <button class="range-pill${rangeMode === 'auto' ? ' active' : ''}" onclick="setVideoRangeMode(${idx}, 'auto')">自动</button>
-        <button class="range-pill${rangeMode === 'hdr' ? ' active' : ''}" onclick="setVideoRangeMode(${idx}, 'hdr')"${c.hasHdr ? '' : ' disabled'}>仅 HDR</button>
+        <button class="range-pill${rangeMode === 'auto' ? ' active' : ''}" onclick="setVideoRangeMode(${idx}, 'auto')"${burnsSubtitles ? ' disabled' : ''}>自动</button>
+        <button class="range-pill${rangeMode === 'hdr' ? ' active' : ''}" onclick="setVideoRangeMode(${idx}, 'hdr')"${c.hasHdr && !burnsSubtitles ? '' : ' disabled'}>仅 HDR</button>
         <button class="range-pill${rangeMode === 'sdr' ? ' active' : ''}" onclick="setVideoRangeMode(${idx}, 'sdr')">仅 SDR</button>
       </div>`;
 
@@ -1481,13 +1635,19 @@
       }
 
       const options = c.options || {};
+      const subtitleMode = options.subtitle_mode || (options.subtitles ? 'embed' : 'none');
+      const subtitleTracks = c.subtitleTracks || [];
+      const subtitleTrackOptions = subtitleTracks.map(track => {
+        const label = `${track.name || track.code} (${track.code})${track.automatic ? ' · 自动字幕' : ''}`;
+        return `<option value="${attr(track.code)}"${options.burn_subtitle_language === track.code ? ' selected' : ''}>${esc(label)}</option>`;
+      }).join('');
       const advancedOptions = `<details class="advanced-options">
         <summary>高级选项</summary>
         <div class="advanced-grid">
           ${!isAudio && !isImage ? `<label class="select-field"><span>封装</span><select onchange="setOption(${idx}, 'container', this.value)"><option value="mp4"${options.container === 'mp4' ? ' selected' : ''}>MP4</option><option value="mkv"${options.container === 'mkv' ? ' selected' : ''}>MKV</option><option value="webm"${options.container === 'webm' ? ' selected' : ''}>WebM</option></select></label>` : ''}
           ${isAudio ? `<label class="select-field"><span>音质</span><select onchange="setOption(${idx}, 'audio_quality', this.value)"><option value="128"${options.audio_quality === '128' ? ' selected' : ''}>128 kbps</option><option value="192"${(options.audio_quality || '192') === '192' ? ' selected' : ''}>192 kbps</option><option value="256"${options.audio_quality === '256' ? ' selected' : ''}>256 kbps</option><option value="320"${options.audio_quality === '320' ? ' selected' : ''}>320 kbps</option></select></label>` : ''}
           ${!isImage ? `<label class="check-field"><input type="checkbox" onchange="setOption(${idx}, 'metadata', this.checked)"${options.metadata ? ' checked' : ''}>写入元数据</label><label class="check-field"><input type="checkbox" onchange="setOption(${idx}, 'embed_thumbnail', this.checked)"${options.embed_thumbnail ? ' checked' : ''}>嵌入封面</label>` : ''}
-          ${!isAudio && !isImage ? `<label class="check-field"><input type="checkbox" onchange="setOption(${idx}, 'subtitles', this.checked)"${options.subtitles ? ' checked' : ''}>嵌入字幕</label><label class="check-field"><input type="checkbox" onchange="setOption(${idx}, 'chapters', this.checked)"${options.chapters ? ' checked' : ''}>保留章节</label><label class="text-field"><span>字幕语言</span><input type="text" value="${attr(options.subtitle_languages || 'zh.*,en.*')}" onchange="setOption(${idx}, 'subtitle_languages', this.value)"></label>` : ''}
+          ${!isAudio && !isImage ? `<label class="select-field"><span>字幕处理</span><select onchange="setSubtitleMode(${idx}, this.value)"><option value="none"${subtitleMode === 'none' ? ' selected' : ''}>不处理字幕</option><option value="embed"${subtitleMode === 'embed' ? ' selected' : ''}>嵌入为可切换字幕</option><option value="burn"${subtitleMode === 'burn' ? ' selected' : ''}>烧录到视频画面</option></select></label><label class="check-field"><input type="checkbox" onchange="setOption(${idx}, 'chapters', this.checked)"${options.chapters ? ' checked' : ''}>保留章节</label>${subtitleMode === 'embed' ? `<label class="text-field"><span>字幕语言</span><input type="text" value="${attr(options.subtitle_languages || 'zh.*,en.*')}" onchange="setOption(${idx}, 'subtitle_languages', this.value)"></label>` : ''}${subtitleMode === 'burn' ? `<label class="select-field"><span>烧录语言</span><select onchange="setOption(${idx}, 'burn_subtitle_language', this.value)"${subtitleTracks.length ? '' : ' disabled'}><option value="">${subtitleTracks.length ? '请选择一种字幕' : '该视频没有可用字幕'}</option>${subtitleTrackOptions}</select><span class="field-help">硬字幕会重新编码视频，并永久显示在画面中；当前仅支持 SDR。</span></label>` : ''}` : ''}
         </div>
       </details>`;
 
@@ -1516,7 +1676,7 @@
         const total = p.total ? fmtSize(p.total) : '';
         const isPaused = c.status === 'paused';
         const statusIcon = isPaused ? '⏸' : '<span class="spin"></span>';
-        const phaseLabel = progressPhaseLabel(p.phase);
+        const phaseLabel = progressPhaseLabel(p.phase, p);
         const etaText = fmtEtaEstimate(p, isPaused);
         const progressDetail = phaseLabel ? etaText : [speed, etaText].filter(Boolean).join(' · ');
         const totalText = p.total_is_estimate ? `约 ${total}` : total;
@@ -1643,8 +1803,23 @@
       cardData[idx].options = { ...(cardData[idx].options || {}), [key]: value };
     }
 
+    function setSubtitleMode(idx, mode) {
+      const c = cardData[idx];
+      c.options = { ...(c.options || {}), subtitle_mode: mode, subtitles: mode === 'embed' };
+      if (mode === 'burn') {
+        c.videoRangeMode = 'sdr';
+        const selected = (c.formats || []).find(item => item.id === c.selectedFormatId);
+        if (selected?.hdr) {
+          c.selectedFormatId = null;
+          c.preset = 'recommended';
+        }
+      }
+      renderCard(idx);
+    }
+
     function setVideoRangeMode(idx, mode) {
       const c = cardData[idx];
+      if ((c.options?.subtitle_mode || 'none') === 'burn' && mode !== 'sdr') return;
       c.videoRangeMode = mode;
       c.selectedFormatId = null;
       if (c.preset === 'custom') c.preset = 'recommended';
@@ -1655,6 +1830,13 @@
       const c = cardData[idx];
       const requestedFormat = currentCardFormat(idx);
       c.activeRequest = buildDownloadRequest(c, requestedFormat);
+      if (c.activeRequest.options?.subtitle_mode === 'burn' &&
+          !c.activeRequest.options?.burn_subtitle_language) {
+        c.status = 'error';
+        c.error = 'Select one subtitle language to burn';
+        renderCard(idx);
+        return;
+      }
       c.status = 'downloading';
       c.error = null;
       c.progress = {};
@@ -1773,6 +1955,15 @@
       queued: '等待中', starting: '正在启动', downloading: '下载中', paused: '已暂停',
       interrupted: '恢复中', done: '已完成', error: '失败', cancelled: '已取消', missing: '文件已移动'
     };
+
+    function taskStatusLabel(task) {
+      if (task.kind === 'local_burn') {
+        if (task.status === 'starting') return '正在准备本地文件';
+        if (task.status === 'downloading') return '正在烧录字幕';
+        if (task.status === 'paused') return '烧录已暂停';
+      }
+      return taskStatusLabels[task.status] || task.status;
+    }
     let taskCenterInitialized = false;
 
     async function taskAction(id, action, extra = {}) {
@@ -1831,7 +2022,7 @@
         document.getElementById('taskList').innerHTML = tasks.map(task => {
           const percent = Number.isFinite(task.progress?.percent) ? ` · ${task.progress.percent.toFixed(1)}%` : '';
           const detail = task.error ? ` · ${esc(friendlyError(task.error))}` : '';
-          return `<div class="task-row"><div><div class="task-title">${esc(task.title || task.filename || '未命名任务')}</div><div class="task-meta">${taskStatusLabels[task.status] || task.status} · ${(task.format || 'video').toUpperCase()}${percent}${detail}</div></div><div class="task-actions">${taskButtons(task)}</div></div>`;
+          return `<div class="task-row"><div><div class="task-title">${esc(task.title || task.filename || '未命名任务')}</div><div class="task-meta">${taskStatusLabel(task)} · ${(task.format || 'video').toUpperCase()}${percent}${detail}</div></div><div class="task-actions">${taskButtons(task)}</div></div>`;
         }).join('');
         if (taskCenterInitialized) {
           tasks.filter(task => task.status === 'done' && !notifiedJobs.has(task.id)).forEach(task => {
