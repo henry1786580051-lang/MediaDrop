@@ -6,7 +6,7 @@ env:
 on:
   push:
     tags:
-      - 'V*'
+      - 'V*-community.*'
   workflow_dispatch:
     inputs:
       release_tag:
@@ -246,5 +246,7 @@ jobs:
           tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
           name: ${{ github.event.inputs.release_tag || github.ref_name }}
           body_path: release-notes.md
+          prerelease: true
+          make_latest: false
           overwrite_files: true
           files: artifacts/**/*
