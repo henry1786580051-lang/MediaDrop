@@ -62,12 +62,18 @@ def get_tools_dir():
     return d
 
 
-def get_ytdlp_asset_name():
-    if sys.platform == "win32":
+def select_ytdlp_asset_name(platform_name, machine):
+    if platform_name == "win32":
+        if str(machine or "").lower() in ("arm64", "aarch64"):
+            return "yt-dlp_arm64.exe"
         return "yt-dlp.exe"
-    if sys.platform == "darwin":
+    if platform_name == "darwin":
         return "yt-dlp_macos"
     return "yt-dlp"
+
+
+def get_ytdlp_asset_name():
+    return select_ytdlp_asset_name(sys.platform, platform.machine())
 
 
 def get_updatable_ytdlp_path():
@@ -250,6 +256,24 @@ def descendant_process_ids(root_pid, process_pairs):
     return result
 
 
+def set_processes_suspended(process_ids, suspended, setter):
+    """Apply a Windows suspend state consistently across a process tree."""
+    changed = []
+    failed = []
+    for pid in process_ids:
+        if setter(pid, suspended):
+            changed.append(pid)
+            continue
+        failed.append(pid)
+        if suspended:
+            for changed_pid in reversed(changed):
+                setter(changed_pid, False)
+            break
+    if failed:
+        action = "suspend" if suspended else "resume"
+        raise OSError(f"Could not {action} download process tree ({', '.join(map(str, failed))})")
+
+
 # Windows pause/resume via NtSuspendProcess/NtResumeProcess (undocumented but stable since NT4)
 # SIGSTOP/SIGCONT are Unix-only and not available on Windows.
 if sys.platform == "win32":
@@ -322,15 +346,11 @@ if sys.platform == "win32":
 
     def _suspend_process(proc):
         descendants = descendant_process_ids(proc.pid, _windows_process_pairs())
-        results = [_set_windows_process_suspended(pid, True) for pid in descendants + [proc.pid]]
-        if not results or not results[-1]:
-            raise OSError(f"Could not suspend download process {proc.pid}")
+        set_processes_suspended(descendants + [proc.pid], True, _set_windows_process_suspended)
 
     def _resume_process(proc):
         descendants = descendant_process_ids(proc.pid, _windows_process_pairs())
-        results = [_set_windows_process_suspended(pid, False) for pid in [proc.pid] + descendants]
-        if not results or not results[0]:
-            raise OSError(f"Could not resume download process {proc.pid}")
+        set_processes_suspended([proc.pid] + descendants, False, _set_windows_process_suspended)
 else:
     def _suspend_process(proc):
         os.killpg(os.getpgid(proc.pid), signal.SIGSTOP)
@@ -398,6 +418,37 @@ def get_cookie_args(cfg=None):
     return []
 
 
+def is_browser_cookie_error(error_text):
+    """Identify browser cookie extraction failures that are safe to retry without cookies."""
+    text = str(error_text or "").lower()
+    if "cookie" not in text:
+        return False
+    markers = (
+        "could not copy",
+        "permission denied",
+        "failed to decrypt",
+        "dpapi",
+        "app-bound",
+        "app bound",
+        "database is locked",
+        "cookie database",
+        "keyring",
+        "nonetype' object has no attribute 'decode",
+    )
+    return any(marker in text for marker in markers)
+
+
+def uses_browser_cookies(cookie_args):
+    return bool(cookie_args) and cookie_args[0] == "--cookies-from-browser"
+
+
+def get_download_cookie_args(options=None, cfg=None):
+    cookie_args = get_cookie_args(cfg)
+    if (options or {}).get("skip_browser_cookies") and uses_browser_cookies(cookie_args):
+        return []
+    return cookie_args
+
+
 def load_config():
     """Load config from disk, merging with defaults. Returns full dict."""
     default_dir = os.path.join(get_base_dir(), "downloads")
@@ -458,6 +509,17 @@ def is_proxy_reachable(proxy_url):
         with socket.create_connection((parsed.hostname, parsed.port), timeout=1):
             return True
     except (OSError, ValueError):
+        return False
+
+
+def is_supported_proxy_url(proxy_url):
+    try:
+        parsed = urllib.parse.urlsplit(str(proxy_url or ""))
+        return (
+            parsed.scheme in ("http", "https", "socks4", "socks5", "socks5h")
+            and bool(parsed.hostname and parsed.port)
+        )
+    except ValueError:
         return False
 
 
@@ -807,7 +869,12 @@ def sanitize_filename(title, ext):
     """Generate a filesystem-safe filename from video title, capped at 80 chars."""
     if not title:
         return None
-    safe = re.sub(r'[\\/:*?"<>|]', "", title).strip()[:80].strip()
+    safe = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "", title).strip().rstrip(". ")[:80].rstrip(". ")
+    reserved = {"CON", "PRN", "AUX", "NUL", "CLOCK$"}
+    reserved.update(f"COM{index}" for index in range(1, 10))
+    reserved.update(f"LPT{index}" for index in range(1, 10))
+    if safe and safe.split(".", 1)[0].upper() in reserved:
+        safe = f"_{safe}"[:80]
     return f"{safe}{ext}" if safe else None
 
 
@@ -1041,7 +1108,11 @@ def get_ytdlp_env():
     """
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
+    configured_proxy = str(load_config().get("proxy_url", "") or "")
     proxy = get_proxy_url()
+    if configured_proxy and not proxy:
+        for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+            env.pop(key, None)
     if proxy:
         env["http_proxy"] = proxy
         env["https_proxy"] = proxy
@@ -1238,7 +1309,7 @@ def run_download(
     proxy = get_proxy_url()
     if proxy:
         cmd += ["--proxy", proxy]
-    cmd += get_cookie_args()
+    cmd += get_download_cookie_args(options)
 
     # Use bundled ffmpeg if available
     ffmpeg_dir = get_ffmpeg_dir()
@@ -1474,6 +1545,7 @@ def normalize_download_options(value):
         "metadata": bool(value.get("metadata")),
         "chapters": bool(value.get("chapters")),
         "embed_thumbnail": bool(value.get("embed_thumbnail")),
+        "skip_browser_cookies": bool(value.get("skip_browser_cookies")),
     }
 
 
@@ -1491,12 +1563,47 @@ def get_info():
         proxy = get_proxy_url()
         if proxy:
             cmd += ["--proxy", proxy]
-        cmd += get_cookie_args()
+        cookie_args = get_cookie_args()
         ffmpeg_dir = get_ffmpeg_dir()
         if ffmpeg_dir:
             cmd += ["--ffmpeg-location", ffmpeg_dir]
+        cmd_with_cookies = cmd + cookie_args
         print("[info] Fetching video info", file=sys.stderr, flush=True)
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=get_ytdlp_env())
+        result = subprocess.run(
+            cmd_with_cookies,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=get_ytdlp_env(),
+        )
+
+        skip_browser_cookies = False
+        cookie_warning = ""
+        browser_cookie_failure = ""
+        if (
+            result.returncode != 0
+            and uses_browser_cookies(cookie_args)
+            and is_browser_cookie_error(result.stderr)
+        ):
+            browser_cookie_failure = result.stderr.strip()
+            print(
+                "[info] Browser cookies unavailable; retrying public info without cookies",
+                file=sys.stderr,
+                flush=True,
+            )
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=get_ytdlp_env(),
+            )
+            if result.returncode == 0:
+                skip_browser_cookies = True
+                cookie_warning = (
+                    "无法读取浏览器 Cookie，本次已不使用 Cookie 解析。"
+                    "登录限定视频请关闭浏览器后重试，或改用 Firefox / cookies.txt。"
+                )
 
         if result.returncode != 0:
             err_detail = result.stderr.strip()
@@ -1504,6 +1611,13 @@ def get_info():
             # Provide helpful message for Safari cookie sandbox issue
             if "Operation not permitted" in err_detail and "Safari" in err_detail:
                 return jsonify({"error": "Safari is not supported due to macOS sandbox restrictions. Open Chrome or Firefox, log into YouTube, then select that browser in Settings > Cookies."}), 400
+            if browser_cookie_failure:
+                return jsonify({
+                    "error": (
+                        "Browser Cookie unavailable: the browser Cookie database could not be read or decrypted. "
+                        "Close the browser completely and retry, or use Firefox / cookies.txt."
+                    )
+                }), 400
             return jsonify({"error": err_detail.split("\n")[-1]}), 400
 
         info = json.loads(result.stdout)
@@ -1551,6 +1665,8 @@ def get_info():
         "uploader": info.get("uploader", ""),
         "formats": formats,
         "has_hdr": any(f["hdr"] for f in formats),
+        "skip_browser_cookies": skip_browser_cookies,
+        "cookie_warning": cookie_warning,
     })
 
 
@@ -1564,6 +1680,7 @@ def start_download():
     title = data.get("title", "")
     preset = str(data.get("preset", "recommended")).lower()
     options = normalize_download_options(data.get("options"))
+    options["skip_browser_cookies"] = bool(data.get("skip_browser_cookies"))
 
     if not url:
         return jsonify({"error": "No URL provided"}), 400
@@ -1918,13 +2035,8 @@ def config():
 
         if "proxy_url" in data:
             proxy_url = str(data["proxy_url"]).strip()
-            if proxy_url:
-                try:
-                    parsed = urllib.parse.urlsplit(proxy_url)
-                    if parsed.scheme not in ("http", "https", "socks4", "socks5", "socks5h") or not parsed.hostname or not parsed.port:
-                        raise ValueError
-                except ValueError:
-                    return jsonify({"error": "Proxy URL must include a supported scheme, host, and port"}), 400
+            if proxy_url and not is_supported_proxy_url(proxy_url):
+                return jsonify({"error": "Proxy URL must include a supported scheme, host, and port"}), 400
             updates["proxy_url"] = proxy_url
 
         if "cookies_browser" in data:
@@ -1990,11 +2102,13 @@ if __name__ == "__main__":
     # First-run: import proxy from Electron's detectProxy() if config is empty.
     # This way users don't need to manually configure their proxy on first launch.
     env_proxy = os.environ.get("PROXY_URL", "")
-    if env_proxy:
+    if env_proxy and is_supported_proxy_url(env_proxy):
         cfg = load_config()
-        if not cfg.get("proxy_url"):
+        if not is_supported_proxy_url(cfg.get("proxy_url")):
             save_config({"proxy_url": env_proxy})
             print(f"[startup] Saved proxy from environment: {env_proxy}", file=sys.stderr, flush=True)
+    elif env_proxy:
+        print("[startup] Ignored invalid proxy from environment", file=sys.stderr, flush=True)
 
     port = int(os.environ.get("PORT", 8899))
     host = os.environ.get("HOST", "127.0.0.1")

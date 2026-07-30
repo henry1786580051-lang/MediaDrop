@@ -1,6 +1,6 @@
 {
   "name": "mediadrop",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Self-hosted video and audio downloader",
   "author": "MediaDrop",
   "main": "main.js",

@@ -6,6 +6,7 @@ import io
 import json
 import os
 import pathlib
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -244,6 +245,46 @@ class CacheLifecycleTests(unittest.TestCase):
         self.assertEqual(pathlib.Path(existing).read_bytes(), b"keep-me")
         self.assertEqual(filename, "Example (1).mp4")
         self.assertEqual(pathlib.Path(final_path).read_bytes(), b"new-file")
+
+    def test_windows_reserved_titles_are_made_safe(self):
+        self.assertEqual(server.sanitize_filename("CON", ".mp4"), "_CON.mp4")
+        self.assertEqual(server.sanitize_filename("com1.notes", ".mp3"), "_com1.notes.mp3")
+        self.assertEqual(server.sanitize_filename("Normal title... ", ".jpg"), "Normal title.jpg")
+        self.assertEqual(server.sanitize_filename("Control\x00title", ".mp4"), "Controltitle.mp4")
+
+    def test_windows_suspend_failure_rolls_back_changed_processes(self):
+        calls = []
+
+        def setter(pid, suspended):
+            calls.append((pid, suspended))
+            return not (pid == 20 and suspended)
+
+        with self.assertRaises(OSError):
+            server.set_processes_suspended([10, 20, 30], True, setter)
+
+        self.assertEqual(calls, [(10, True), (20, True), (10, False)])
+
+    def test_windows_resume_attempts_every_process_before_reporting_failure(self):
+        calls = []
+
+        def setter(pid, suspended):
+            calls.append((pid, suspended))
+            return pid != 20
+
+        with self.assertRaises(OSError):
+            server.set_processes_suspended([10, 20, 30], False, setter)
+
+        self.assertEqual(calls, [(10, False), (20, False), (30, False)])
+
+    def test_ytdlp_update_asset_matches_windows_architecture(self):
+        self.assertEqual(
+            server.select_ytdlp_asset_name("win32", "ARM64"),
+            "yt-dlp_arm64.exe",
+        )
+        self.assertEqual(
+            server.select_ytdlp_asset_name("win32", "AMD64"),
+            "yt-dlp.exe",
+        )
 
     def test_concurrent_same_title_downloads_both_survive(self):
         _, first_source = self.make_cached_file("job-1", b"first")
@@ -621,6 +662,92 @@ class PersistenceAndApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["max_concurrent"], 3)
         process_queue.assert_called_once()
+
+    def test_config_rejects_malformed_proxy(self):
+        response = server.app.test_client().post(
+            "/api/config",
+            json={"proxy_url": "http://http=127.0.0.1:8080;https=127.0.0.1:8443"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_invalid_saved_proxy_is_removed_from_ytdlp_environment(self):
+        source_env = {
+            "PATH": "test-path",
+            "http_proxy": "http://http=127.0.0.1:8080;https=127.0.0.1:8443",
+            "HTTPS_PROXY": "http://http=127.0.0.1:8080;https=127.0.0.1:8443",
+        }
+        with mock.patch.object(
+            server, "load_config", return_value={"proxy_url": source_env["http_proxy"]}
+        ), mock.patch.object(server, "get_proxy_url", return_value=""), mock.patch.object(
+            server.os.environ, "copy", return_value=source_env.copy()
+        ):
+            result = server.get_ytdlp_env()
+
+        self.assertEqual(result, {"PATH": "test-path"})
+
+    def test_info_retries_without_browser_cookies_when_database_is_locked(self):
+        failed = subprocess.CompletedProcess(
+            [], 1, "", "ERROR: Could not copy Chrome cookie database. Permission denied"
+        )
+        succeeded = subprocess.CompletedProcess(
+            [], 0, json.dumps({"title": "Public video", "formats": []}), ""
+        )
+        with mock.patch.object(server, "get_ytdlp_path", return_value="yt-dlp"), \
+             mock.patch.object(server, "get_proxy_url", return_value=""), \
+             mock.patch.object(server, "get_cookie_args", return_value=["--cookies-from-browser", "chrome"]), \
+             mock.patch.object(server, "get_ffmpeg_dir", return_value=None), \
+             mock.patch.object(server, "get_ytdlp_env", return_value={}), \
+             mock.patch.object(server.subprocess, "run", side_effect=[failed, succeeded]) as run:
+            response = server.app.test_client().post(
+                "/api/info", json={"url": "https://www.youtube.com/watch?v=public"}
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["skip_browser_cookies"])
+        self.assertIn("不使用 Cookie", payload["cookie_warning"])
+        self.assertIn("--cookies-from-browser", run.call_args_list[0].args[0])
+        self.assertNotIn("--cookies-from-browser", run.call_args_list[1].args[0])
+
+    def test_info_does_not_hide_unrelated_ytdlp_errors(self):
+        failed = subprocess.CompletedProcess([], 1, "", "ERROR: Unsupported URL")
+        with mock.patch.object(server, "get_ytdlp_path", return_value="yt-dlp"), \
+             mock.patch.object(server, "get_proxy_url", return_value=""), \
+             mock.patch.object(server, "get_cookie_args", return_value=["--cookies-from-browser", "chrome"]), \
+             mock.patch.object(server, "get_ffmpeg_dir", return_value=None), \
+             mock.patch.object(server, "get_ytdlp_env", return_value={}), \
+             mock.patch.object(server.subprocess, "run", return_value=failed) as run:
+            response = server.app.test_client().post(
+                "/api/info", json={"url": "https://example.com/unsupported"}
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("Unsupported URL", response.get_json()["error"])
+
+    def test_download_keeps_one_time_browser_cookie_fallback(self):
+        with mock.patch.object(server, "process_download_queue"):
+            response = server.app.test_client().post("/api/download", json={
+                "url": "https://www.youtube.com/watch?v=public",
+                "format": "video",
+                "skip_browser_cookies": True,
+            })
+
+        self.assertEqual(response.status_code, 200)
+        job = server.jobs[response.get_json()["job_id"]]
+        self.assertTrue(job["options"]["skip_browser_cookies"])
+        with mock.patch.object(
+            server, "get_cookie_args", return_value=["--cookies-from-browser", "chrome"]
+        ):
+            self.assertEqual(server.get_download_cookie_args(job["options"]), [])
+        with mock.patch.object(
+            server, "get_cookie_args", return_value=["--cookies", "cookies.txt"]
+        ):
+            self.assertEqual(
+                server.get_download_cookie_args(job["options"]),
+                ["--cookies", "cookies.txt"],
+            )
 
     def test_reorder_queue_returns_without_reacquiring_the_queue_lock(self):
         server.download_queue.extend(["first", "second"])

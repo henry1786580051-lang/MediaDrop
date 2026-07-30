@@ -7,9 +7,12 @@ const net = require("net");
 const crypto = require("crypto");
 const {
   compareVersions,
+  getDevelopmentPythonCandidates,
   isSafeExternalUrl,
   isSupportedProxyUrl,
   isTrustedMediaDropReleaseUrl,
+  normalizeProxyEndpoint,
+  parseWindowsProxyServer,
   selectReleaseAsset,
   stopProcessTree,
 } = require("./electron-utils");
@@ -177,9 +180,9 @@ if (process.platform === "darwin") {
 // NOTE: Cannot detect TUN-mode proxies (e.g. Clash in enhanced mode) since they
 // operate at the network layer without exposing a system proxy setting.
 function detectProxy() {
-  // 1. Already set in environment — trust whatever the caller configured
-  if (process.env.https_proxy || process.env.http_proxy)
-    return process.env.https_proxy || process.env.http_proxy;
+  // 1. Already set in environment
+  const environmentProxy = normalizeProxyEndpoint(process.env.https_proxy || process.env.http_proxy);
+  if (environmentProxy) return environmentProxy;
 
   const { execSync } = require("child_process");
 
@@ -197,7 +200,8 @@ function detectProxy() {
         );
         const match = server.match(/ProxyServer\s+REG_SZ\s+(.+)/);
         if (match) {
-          const proxy = `http://${match[1].trim()}`;
+          const proxy = parseWindowsProxyServer(match[1]);
+          if (!proxy) return null;
           process.env.http_proxy = proxy;
           process.env.https_proxy = proxy;
           console.log(`[proxy] Using Windows system proxy: ${proxy}`);
@@ -273,7 +277,7 @@ function getBinDir() {
 }
 
 // In packaged mode: return bundled mediadrop-server executable.
-// In dev mode: prefer venv Python, fall back to system python3.
+// In dev mode: prefer the platform's venv Python, then its normal PATH command.
 function getPythonPath() {
   if (app.isPackaged) {
     const binDir = getBinDir();
@@ -281,9 +285,8 @@ function getPythonPath() {
     const exe = path.join(binDir, name);
     if (fs.existsSync(exe)) return exe;
   }
-  const venvPython = path.join(getResourcePath(), "venv", "bin", "python3");
-  if (fs.existsSync(venvPython)) return venvPython;
-  return "python3";
+  const candidates = getDevelopmentPythonCandidates(getResourcePath());
+  return candidates.find((candidate) => path.isAbsolute(candidate) && fs.existsSync(candidate)) || candidates.at(-1);
 }
 
 // Check required dependencies. Packaged: check bundled binaries exist on disk.
@@ -301,27 +304,22 @@ function checkDependencies() {
     }
 
     const checks = [
-      { cmd: "python3", args: ["--version"], name: "Python 3" },
+      { cmd: getPythonPath(), args: ["--version"], name: "Python 3" },
       { cmd: "yt-dlp", args: ["--version"], name: "yt-dlp" },
       { cmd: "ffmpeg", args: ["-version"], name: "ffmpeg" },
     ];
 
-    let missing = [];
-    let checked = 0;
-
-    checks.forEach(({ cmd, args, name }) => {
-      const proc = spawn(cmd, args, { stdio: "pipe" });
-      proc.on("error", () => {
-        missing.push(name);
-        checked++;
-        if (checked === checks.length) resolve(missing);
-      });
-      proc.on("close", (code) => {
-        if (code !== 0) missing.push(name);
-        checked++;
-        if (checked === checks.length) resolve(missing);
-      });
-    });
+    Promise.all(checks.map(({ cmd, args, name }) => new Promise((done) => {
+      let settled = false;
+      const finish = (available) => {
+        if (settled) return;
+        settled = true;
+        done(available ? null : name);
+      };
+      const proc = spawn(cmd, args, { stdio: "pipe", windowsHide: true });
+      proc.once("error", () => finish(false));
+      proc.once("close", (code) => finish(code === 0));
+    }))).then((results) => resolve(results.filter(Boolean)));
   });
 }
 
@@ -530,9 +528,12 @@ app.whenReady().then(async () => {
   const missing = await checkDependencies();
 
   if (missing.length > 0) {
+    const installHint = process.platform === "darwin"
+      ? `Install with:\n  brew install ${missing.map((m) => m.toLowerCase().replace(" ", "-")).join(" ")}`
+      : "Install Python 3, yt-dlp, and FFmpeg, and make sure they are available on PATH.";
     const message = app.isPackaged
       ? `Bundled dependencies are missing: ${missing.join(", ")}\n\nThis is a packaging error. Please reinstall MediaDrop.`
-      : `MediaDrop requires the following to be installed:\n\n${missing.join(", ")}\n\nInstall with:\n  brew install ${missing.map((m) => m.toLowerCase().replace(" ", "-")).join(" ")}`;
+      : `MediaDrop requires the following to be installed:\n\n${missing.join(", ")}\n\n${installHint}`;
     await dialog.showMessageBox({
       type: "error",
       title: "Missing Dependencies",

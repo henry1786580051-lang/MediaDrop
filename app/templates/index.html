@@ -261,6 +261,13 @@
       margin-bottom: 8px;
     }
 
+    .cookie-warning {
+      margin-top: 5px;
+      color: #9a5a17;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
     .card-actions {
       display: flex;
       gap: 6px;
@@ -1281,7 +1288,7 @@
       if (err.includes('HTTP Error 404')) return '未找到该视频';
       if (err.includes('Sign in to confirm')) return 'YouTube 需要登录认证，请在设置中选择已登录的浏览器或 cookies.txt';
       if (err.includes('Operation not permitted') && err.includes('Safari')) return '暂不支持 Safari，请登录 Chrome 或 Firefox 后在设置中选择对应浏览器';
-      if (err.toLowerCase().includes('cookies')) return 'Cookie 无效，请确认浏览器已登录 YouTube，或导入有效的 cookies.txt';
+      if (err.toLowerCase().includes('cookie')) return '浏览器 Cookie 无法读取或已失效；请彻底关闭浏览器后重试，或改用 Firefox / cookies.txt';
       if (err.toLowerCase().includes('copyright')) return '视频因版权限制而无法下载';
       if (err.toLowerCase().includes('geo')) return '当前地区无法播放此视频';
       if (err.includes('timed out') || err.includes('Timed out')) return '请求超时，请重试';
@@ -1359,6 +1366,8 @@
               uploader: data.uploader || '',
               formats: data.formats || [],
               hasHdr: Boolean(data.has_hdr),
+              skipBrowserCookies: Boolean(data.skip_browser_cookies),
+              cookieWarning: data.cookie_warning || '',
               videoRangeMode: 'auto',
               selectedFormatId: null,
               preset: 'recommended',
@@ -1570,6 +1579,7 @@
         <div class="card-body">
           <div class="card-title">${esc(c.title || '未命名媒体')}</div>
           <div class="card-meta">${esc(c.uploader)}${c.duration ? ' · ' + fmtDur(c.duration) : ''}</div>
+          ${c.cookieWarning ? `<div class="cookie-warning">${esc(c.cookieWarning)}</div>` : ''}
           <div class="card-actions">${actionHtml}</div>
           ${progressHtml}
         </div>
@@ -1672,6 +1682,7 @@
             video_range_mode: c.activeRequest.videoRangeMode || 'auto',
             preset: c.activeRequest.preset,
             options: c.activeRequest.options,
+            skip_browser_cookies: Boolean(c.skipBrowserCookies),
             title: c.title || '',
           }),
         });

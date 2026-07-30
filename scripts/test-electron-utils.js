@@ -1,8 +1,10 @@
 const {
   compareVersions,
+  getDevelopmentPythonCandidates,
   isSafeExternalUrl,
   isSupportedProxyUrl,
   isTrustedMediaDropReleaseUrl,
+  parseWindowsProxyServer,
   selectReleaseAsset,
   stopProcessTree,
 } = require("../electron-utils");
@@ -22,6 +24,12 @@ assert(isSupportedProxyUrl("http://127.0.0.1:7897"), "HTTP proxy URL was rejecte
 assert(isSupportedProxyUrl("socks5://localhost:1080"), "SOCKS proxy URL was rejected");
 assert(!isSupportedProxyUrl("http://localhost"), "Proxy without a port was accepted");
 assert(!isSupportedProxyUrl("file:///tmp/socket"), "Unsafe proxy scheme was accepted");
+assert(parseWindowsProxyServer("127.0.0.1:7897") === "http://127.0.0.1:7897", "Simple Windows proxy was not normalized");
+assert(parseWindowsProxyServer("http=127.0.0.1:8080;https=127.0.0.1:8443") === "http://127.0.0.1:8443", "Protocol-specific Windows proxy was not parsed");
+assert(parseWindowsProxyServer("socks=127.0.0.1:1080") === "socks5://127.0.0.1:1080", "Windows SOCKS proxy was not parsed");
+assert(parseWindowsProxyServer("http=invalid") === null, "Invalid Windows proxy was accepted");
+assert(getDevelopmentPythonCandidates("C:\\app", "win32")[0].endsWith("Scripts/python.exe") || getDevelopmentPythonCandidates("C:\\app", "win32")[0].endsWith("Scripts\\python.exe"), "Windows venv Python path is incorrect");
+assert(getDevelopmentPythonCandidates("C:\\app", "win32").at(-1) === "python", "Windows Python fallback is incorrect");
 assert(compareVersions("V1.1.0", "1.0.7") > 0, "New release version was not detected");
 assert(compareVersions("1.0.7", "V1.0.7") === 0, "Equivalent versions did not match");
 assert(compareVersions("1.1.0-beta.1", "1.1.0") < 0, "Prerelease ordering is incorrect");
