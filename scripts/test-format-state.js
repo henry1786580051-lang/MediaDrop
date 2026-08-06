@@ -5,10 +5,19 @@ const template = fs.readFileSync(
   path.join(__dirname, "..", "app", "templates", "index.html"),
   "utf8"
 );
-const scriptMatch = template.match(/<script>([\s\S]*?)<\/script>/);
-if (!scriptMatch) throw new Error("Inline application script was not found");
-
-const source = scriptMatch[1];
+const source = fs.readFileSync(
+  path.join(__dirname, "..", "app", "static", "app.js"),
+  "utf8"
+);
+if (!template.includes('<link rel="stylesheet" href="/static/app.css">')) {
+  throw new Error("External application stylesheet was not loaded");
+}
+if (!template.includes('<script src="/static/app.js" defer></script>')) {
+  throw new Error("External application script was not loaded");
+}
+if (/\son(?:click|change|blur)=|\sstyle=/.test(template) || /\son(?:click|change|blur)=|\sstyle=/.test(source)) {
+  throw new Error("Inline handlers or styles prevent a strict content security policy");
+}
 if (/setInterval\s*\(\s*async/.test(source)) {
   throw new Error("Async interval polling can overlap and apply stale responses");
 }

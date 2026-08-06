@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const { verifyFfmpeg } = require("./verify-ffmpeg");
 
 const root = path.join(__dirname, "..");
 const appBinDir = path.join(root, "dist", "mac-arm64", "MediaDrop.app", "Contents", "Resources", "bin");
@@ -12,5 +13,7 @@ for (const name of required) {
   }
   fs.accessSync(file, fs.constants.X_OK);
 }
+
+verifyFfmpeg(path.join(appBinDir, "ffmpeg"), "arm64", "8.1.2");
 
 console.log(`Bundle verification passed: ${required.join(", ")}`);

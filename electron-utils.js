@@ -1,6 +1,20 @@
 const { spawnSync } = require("child_process");
 const path = require("path");
 
+function appendBoundedText(current, chunk, maxLength = 128 * 1024) {
+  const limit = Math.max(0, Number(maxLength) || 0);
+  if (limit === 0) return "";
+  const combined = `${current || ""}${chunk || ""}`;
+  return combined.length <= limit ? combined : combined.slice(-limit);
+}
+
+function parseServerReadyPort(output) {
+  const match = String(output || "").match(/\[startup\] MEDIADROP_READY 127\.0\.0\.1:(\d{1,5})/);
+  if (!match) return null;
+  const port = Number(match[1]);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
+}
+
 function isSafeExternalUrl(value) {
   try {
     const url = new URL(value);
@@ -124,12 +138,14 @@ function stopProcessTree(child) {
 }
 
 module.exports = {
+  appendBoundedText,
   compareVersions,
   getDevelopmentPythonCandidates,
   isSafeExternalUrl,
   isSupportedProxyUrl,
   isTrustedMediaDropReleaseUrl,
   normalizeProxyEndpoint,
+  parseServerReadyPort,
   parseWindowsProxyServer,
   selectReleaseAsset,
   stopProcessTree,

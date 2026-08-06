@@ -23,6 +23,7 @@ import urllib.request
 from collections import deque
 
 from flask import Flask, request, jsonify, send_file, render_template, redirect, make_response
+from werkzeug.serving import make_server
 
 try:
     from job_store import JobStore
@@ -137,6 +138,8 @@ API_TOKEN = os.environ.get("MEDIADROP_API_TOKEN", "")
 jobs = {}
 download_queue = []
 active_downloads = set()
+jobs_lock = threading.RLock()
+config_lock = threading.RLock()
 queue_lock = threading.Lock()
 filename_lock = threading.Lock()
 store_lock = threading.Lock()
@@ -157,15 +160,19 @@ def get_job_store():
 
 
 def persist_job(job_id, force=False):
-    job = jobs.get(job_id)
-    if not job:
-        return
     now = time.monotonic()
-    if not force and now - job.get("_last_persist", 0) < 2:
-        return
-    job.setdefault("created_at", time.time())
-    get_job_store().save(job_id, job)
-    job["_last_persist"] = now
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            return
+        if not force and now - job.get("_last_persist", 0) < 2:
+            return
+        job.setdefault("created_at", time.time())
+        snapshot = dict(job)
+    get_job_store().save(job_id, snapshot)
+    with jobs_lock:
+        if jobs.get(job_id) is job:
+            job["_last_persist"] = now
 
 
 def job_payload(job_id, job):
@@ -201,16 +208,20 @@ def require_local_api_token():
     return None
 
 
+@app.route("/api/health")
+def health():
+    return jsonify({"service": "mediadrop", "status": "ok"})
+
+
 @app.after_request
 def apply_security_headers(response):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "font-src 'self' https://fonts.gstatic.com; img-src 'self' data: http: https:; "
-        "connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+        "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; "
+        "img-src 'self' data: http: https:; connect-src 'self'; object-src 'none'; "
+        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     )
     return response
 
@@ -220,7 +231,9 @@ def cleanup_all_jobs():
     if shutdown_event.is_set():
         return
     shutdown_event.set()
-    for job_id, job in list(jobs.items()):
+    with jobs_lock:
+        job_items = list(jobs.items())
+    for job_id, job in job_items:
         if job.get("status") not in ("done", "error", "cancelled", "missing"):
             job["status"] = "interrupted"
             job["error"] = None
@@ -232,7 +245,9 @@ def cleanup_all_jobs():
                 proc.wait(timeout=3)
             except Exception:
                 pass
-    for job in list(jobs.values()):
+    with jobs_lock:
+        job_values = list(jobs.values())
+    for job in job_values:
         thread = job.get("thread")
         if thread and thread is not threading.current_thread() and thread.is_alive():
             thread.join(timeout=3)
@@ -387,18 +402,21 @@ def terminate_process_tree(proc):
 
 def cleanup_old_jobs():
     """Bound runtime and journal history without removing active tasks."""
-    if len(jobs) <= 250:
-        return
-    terminal = sorted(
-        (
-            (job_id, job)
-            for job_id, job in jobs.items()
-            if job.get("status") in ("done", "error", "cancelled", "missing")
-        ),
-        key=lambda item: item[1].get("created_at", 0),
-    )
-    for job_id, _job in terminal[:max(0, len(jobs) - 200)]:
-        jobs.pop(job_id, None)
+    with jobs_lock:
+        if len(jobs) <= 250:
+            return
+        terminal = sorted(
+            (
+                (job_id, job)
+                for job_id, job in jobs.items()
+                if job.get("status") in ("done", "error", "cancelled", "missing")
+            ),
+            key=lambda item: item[1].get("created_at", 0),
+        )
+        removed_ids = [job_id for job_id, _job in terminal[:max(0, len(jobs) - 200)]]
+        for job_id in removed_ids:
+            jobs.pop(job_id, None)
+    for job_id in removed_ids:
         get_job_store().delete(job_id)
     get_job_store().trim(keep=200)
 
@@ -460,28 +478,30 @@ def load_config():
         "max_concurrent": DEFAULT_MAX_CONCURRENT_DOWNLOADS,
     }
     config_file = os.path.join(get_base_dir(), "config.json")
-    if os.path.exists(config_file):
-        try:
-            with open(config_file, encoding="utf-8") as f:
-                cfg = json.load(f)
-            # Merge with defaults so new keys are always present
-            return {**defaults, **cfg}
-        except Exception:
-            pass
-    return defaults
+    with config_lock:
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, encoding="utf-8") as f:
+                    cfg = json.load(f)
+                # Merge with defaults so new keys are always present
+                return {**defaults, **cfg}
+            except Exception:
+                pass
+        return defaults
 
 
 def save_config(updates):
     """Merge updates into existing config and write to disk."""
-    cfg = load_config()
-    cfg.update(updates)
-    config_file = os.path.join(get_base_dir(), "config.json")
-    temp_file = f"{config_file}.tmp"
-    with open(temp_file, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(temp_file, config_file)
+    with config_lock:
+        cfg = load_config()
+        cfg.update(updates)
+        config_file = os.path.join(get_base_dir(), "config.json")
+        temp_file = f"{config_file}.tmp"
+        with open(temp_file, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_file, config_file)
 
 
 def make_unique_filename(directory, base_name, ext):
@@ -983,7 +1003,8 @@ def restore_jobs():
             saved["status"] = "missing"
             saved["file"] = None
             changed.append(job_id)
-        jobs[job_id] = saved
+        with jobs_lock:
+            jobs[job_id] = saved
         restored.append(job_id)
 
     cleanup_cache_root(preserve_ids=resumable)
@@ -1242,7 +1263,8 @@ def process_download_queue():
         max_concurrent = max(1, min(4, int(load_config().get("max_concurrent", 2))))
         while download_queue and len(active_downloads) < max_concurrent:
             job_id = download_queue.pop(0)
-            job = jobs.get(job_id)
+            with jobs_lock:
+                job = jobs.get(job_id)
             if not job or job.get("status") != "queued":
                 continue
             active_downloads.add(job_id)
@@ -1276,7 +1298,8 @@ def run_download(
     preset="recommended",
     options=None,
 ):
-    job = jobs[job_id]
+    with jobs_lock:
+        job = jobs[job_id]
     options = options or {}
     download_dir = get_download_dir()
     try:
@@ -1699,18 +1722,19 @@ def start_download():
     # Generate a readable-enough job ID from URL hash + timestamp
     url_hash = re.sub(r"[^a-zA-Z0-9]", "_", url)[-40:]
     job_id = f"{url_hash}_{time.time_ns()}_{uuid.uuid4().hex[:8]}"
-    jobs[job_id] = {
-        "status": "queued",
-        "url": url,
-        "format": format_choice,
-        "format_id": format_id,
-        "video_range_mode": video_range_mode,
-        "title": title,
-        "preset": preset,
-        "options": options,
-        "progress": empty_progress(),
-        "created_at": time.time(),
-    }
+    with jobs_lock:
+        jobs[job_id] = {
+            "status": "queued",
+            "url": url,
+            "format": format_choice,
+            "format_id": format_id,
+            "video_range_mode": video_range_mode,
+            "title": title,
+            "preset": preset,
+            "options": options,
+            "progress": empty_progress(),
+            "created_at": time.time(),
+        }
     persist_job(job_id, force=True)
 
     with queue_lock:
@@ -1722,7 +1746,8 @@ def start_download():
 
 @app.route("/api/status/<job_id>")
 def check_status(job_id):
-    job = jobs.get(job_id)
+    with jobs_lock:
+        job = jobs.get(job_id)
     if not job:
         return jsonify({"error": "Job not found"}), 404
     estimator = job.get("estimator")
@@ -1739,7 +1764,8 @@ def check_status(job_id):
 
 @app.route("/api/file/<job_id>")
 def download_file(job_id):
-    job = jobs.get(job_id)
+    with jobs_lock:
+        job = jobs.get(job_id)
     if not job or job["status"] != "done":
         return jsonify({"error": "File not ready"}), 404
     file_path = job["file"]
@@ -1753,7 +1779,8 @@ def download_file(job_id):
 
 @app.route("/api/pause/<job_id>", methods=["POST"])
 def pause_download(job_id):
-    job = jobs.get(job_id)
+    with jobs_lock:
+        job = jobs.get(job_id)
     if not job or not job.get("proc"):
         return jsonify({"error": "Job not found"}), 404
     proc = job["proc"]
@@ -1784,7 +1811,8 @@ def pause_download(job_id):
 
 @app.route("/api/cancel/<job_id>", methods=["POST"])
 def cancel_download(job_id):
-    job = jobs.get(job_id)
+    with jobs_lock:
+        job = jobs.get(job_id)
     if not job:
         return jsonify({"error": "Job not found"}), 404
     proc = job.get("proc")
@@ -1829,30 +1857,31 @@ def list_jobs():
         limit = max(1, min(int(request.args.get("limit", 50)), 200))
     except ValueError:
         return jsonify({"error": "Invalid task limit"}), 400
-    ordered = sorted(
-        jobs.items(), key=lambda item: item[1].get("created_at", 0), reverse=True
-    )
+    with jobs_lock:
+        job_items = list(jobs.items())
+    ordered = sorted(job_items, key=lambda item: item[1].get("created_at", 0), reverse=True)
     return jsonify({"jobs": [job_payload(job_id, job) for job_id, job in ordered[:limit]]})
 
 
 @app.route("/api/jobs/<job_id>/retry", methods=["POST"])
 def retry_job(job_id):
-    source = jobs.get(job_id)
-    if not source or source.get("status") not in ("done", "error", "cancelled", "missing"):
-        return jsonify({"error": "Task cannot be retried"}), 400
-    new_id = f"retry_{time.time_ns()}_{uuid.uuid4().hex[:8]}"
-    jobs[new_id] = {
-        "status": "queued",
-        "url": source.get("url", ""),
-        "format": source.get("format", "video"),
-        "format_id": source.get("format_id"),
-        "video_range_mode": source.get("video_range_mode", "auto"),
-        "title": source.get("title", ""),
-        "preset": source.get("preset", "recommended"),
-        "options": source.get("options") or {},
-        "progress": empty_progress(),
-        "created_at": time.time(),
-    }
+    with jobs_lock:
+        source = jobs.get(job_id)
+        if not source or source.get("status") not in ("done", "error", "cancelled", "missing"):
+            return jsonify({"error": "Task cannot be retried"}), 400
+        new_id = f"retry_{time.time_ns()}_{uuid.uuid4().hex[:8]}"
+        jobs[new_id] = {
+            "status": "queued",
+            "url": source.get("url", ""),
+            "format": source.get("format", "video"),
+            "format_id": source.get("format_id"),
+            "video_range_mode": source.get("video_range_mode", "auto"),
+            "title": source.get("title", ""),
+            "preset": source.get("preset", "recommended"),
+            "options": source.get("options") or {},
+            "progress": empty_progress(),
+            "created_at": time.time(),
+        }
     persist_job(new_id, force=True)
     with queue_lock:
         download_queue.append(new_id)
@@ -1862,15 +1891,16 @@ def retry_job(job_id):
 
 @app.route("/api/jobs/<job_id>", methods=["DELETE"])
 def delete_job(job_id):
-    job = jobs.get(job_id)
-    if not job:
-        return jsonify({"error": "Job not found"}), 404
-    if job.get("status") not in ("done", "error", "cancelled", "missing"):
-        return jsonify({"error": "Active tasks cannot be removed"}), 400
-    cache_dir = job.get("cache_dir")
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+        if job.get("status") not in ("done", "error", "cancelled", "missing"):
+            return jsonify({"error": "Active tasks cannot be removed"}), 400
+        cache_dir = job.get("cache_dir")
+        jobs.pop(job_id, None)
     if cache_dir:
         cleanup_job_cache(cache_dir)
-    jobs.pop(job_id, None)
     get_job_store().delete(job_id)
     return jsonify({"status": "deleted"})
 
@@ -1978,9 +2008,9 @@ def _redacted_proxy(proxy):
 def diagnostics():
     cfg = load_config()
     proxy = cfg.get("proxy_url", "")
-    recent = sorted(
-        jobs.items(), key=lambda item: item[1].get("created_at", 0), reverse=True
-    )[:20]
+    with jobs_lock:
+        job_items = list(jobs.items())
+    recent = sorted(job_items, key=lambda item: item[1].get("created_at", 0), reverse=True)[:20]
     report = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "app_version": os.environ.get("MEDIADROP_VERSION", "development"),
@@ -2112,6 +2142,11 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 8899))
     host = os.environ.get("HOST", "127.0.0.1")
-    print(f"[startup] MediaDrop starting on {host}:{port}", file=sys.stderr, flush=True)
+    server = make_server(host, port, app, threaded=True)
     process_download_queue()
-    app.run(host=host, port=port)
+    print(
+        f"[startup] MEDIADROP_READY {host}:{server.server_port}",
+        file=sys.stderr,
+        flush=True,
+    )
+    server.serve_forever()

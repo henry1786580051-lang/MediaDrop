@@ -8,6 +8,7 @@ import os
 import pathlib
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -650,9 +651,24 @@ class PersistenceAndApiTests(unittest.TestCase):
     def test_api_token_blocks_unauthorized_local_requests(self):
         with mock.patch.object(server, "API_TOKEN", "secret"):
             client = server.app.test_client()
+            self.assertEqual(client.get("/api/health").status_code, 403)
             self.assertEqual(client.get("/api/config").status_code, 403)
+            health = client.get("/api/health", headers={"X-MediaDrop-Token": "secret"})
+            self.assertEqual(health.get_json(), {"service": "mediadrop", "status": "ok"})
             response = client.get("/api/config", headers={"X-MediaDrop-Token": "secret"})
             self.assertEqual(response.status_code, 200)
+
+    def test_frontend_uses_local_assets_and_strict_security_policy(self):
+        response = server.app.test_client().get("/")
+        html = response.get_data(as_text=True)
+        policy = response.headers["Content-Security-Policy"]
+
+        self.assertIn('/static/app.css', html)
+        self.assertIn('/static/app.js', html)
+        self.assertNotIn('onclick=', html)
+        self.assertNotIn('unsafe-inline', policy)
+        self.assertIn("script-src 'self'", policy)
+        self.assertIn("style-src 'self'", policy)
 
     def test_config_validates_and_saves_concurrency(self):
         client = server.app.test_client()
@@ -662,6 +678,21 @@ class PersistenceAndApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["max_concurrent"], 3)
         process_queue.assert_called_once()
+
+    def test_concurrent_partial_config_updates_are_not_lost(self):
+        worker_count = 8
+        barrier = threading.Barrier(worker_count)
+
+        def write_setting(index):
+            barrier.wait()
+            server.save_config({f"concurrent_setting_{index}": index})
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+            list(executor.map(write_setting, range(worker_count)))
+
+        saved = server.load_config()
+        for index in range(worker_count):
+            self.assertEqual(saved[f"concurrent_setting_{index}"], index)
 
     def test_config_rejects_malformed_proxy(self):
         response = server.app.test_client().post(

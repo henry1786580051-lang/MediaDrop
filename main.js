@@ -6,12 +6,14 @@ const fs = require("fs");
 const net = require("net");
 const crypto = require("crypto");
 const {
+  appendBoundedText,
   compareVersions,
   getDevelopmentPythonCandidates,
   isSafeExternalUrl,
   isSupportedProxyUrl,
   isTrustedMediaDropReleaseUrl,
   normalizeProxyEndpoint,
+  parseServerReadyPort,
   parseWindowsProxyServer,
   selectReleaseAsset,
   stopProcessTree,
@@ -19,8 +21,7 @@ const {
 
 let mainWindow = null;
 let flaskProcess = null;
-const DEFAULT_PORT = 8899;
-let PORT = DEFAULT_PORT; // Actual port used, may differ from DEFAULT_PORT if occupied
+let PORT = null;
 const API_TOKEN = crypto.randomBytes(32).toString("hex");
 const RELEASE_API_URL = "https://api.github.com/repos/henry1786580051-lang/MediaDrop/releases/latest";
 const UPDATE_CHECK_INTERVAL = 6 * 60 * 60 * 1000;
@@ -245,21 +246,6 @@ function detectProxy() {
   return null;
 }
 
-// Try to bind startPort; if occupied, recursively try startPort+1, +2, etc.
-// Uses net.createServer() to test availability without actually starting a server.
-function findAvailablePort(startPort) {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.listen(startPort, "127.0.0.1", () => {
-      const port = server.address().port;
-      server.close(() => resolve(port));
-    });
-    server.on("error", () => {
-      findAvailablePort(startPort + 1).then(resolve).catch(reject);
-    });
-  });
-}
-
 // Resolve the app/ directory path — different locations in dev vs packaged DMG
 function getResourcePath() {
   if (app.isPackaged) {
@@ -323,28 +309,21 @@ function checkDependencies() {
   });
 }
 
-// Poll port with TCP connect every 300ms until Flask is ready or timeout.
-function waitForPort(port, timeout = 15000) {
-  return new Promise((resolve, reject) => {
-    const start = Date.now();
-    const tryConnect = () => {
-      const socket = new net.Socket();
-      socket.once("connect", () => {
-        socket.destroy();
-        resolve();
+async function waitForServerReady(port, child, timeout = 15000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null) throw new Error("MediaDrop server exited before becoming ready");
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
+        headers: { "X-MediaDrop-Token": API_TOKEN },
+        signal: AbortSignal.timeout(1000),
       });
-      socket.once("error", () => {
-        socket.destroy();
-        if (Date.now() - start > timeout) {
-          reject(new Error("Flask server did not start in time"));
-        } else {
-          setTimeout(tryConnect, 300);
-        }
-      });
-      socket.connect(port, "127.0.0.1");
-    };
-    tryConnect();
-  });
+      const payload = await response.json();
+      if (response.ok && payload.service === "mediadrop" && payload.status === "ok") return;
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error("MediaDrop server did not pass its health check in time");
 }
 
 // Launch Flask (or bundled mediadrop-server) as a child process.
@@ -356,9 +335,19 @@ function startFlaskServer(proxyUrl) {
 
   return new Promise((resolve, reject) => {
     let stderrOutput = "";
+    let settled = false;
+    let readinessStarted = false;
+    let startupTimer = null;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      if (startupTimer) clearTimeout(startupTimer);
+      callback(value);
+    };
     const flaskEnv = {
       ...process.env,
-      PORT: String(PORT),
+      // Port 0 lets the operating system reserve an available port atomically.
+      PORT: "0",
       HOST: "127.0.0.1",
       MEDIADROP_API_TOKEN: API_TOKEN,
       MEDIADROP_VERSION: app.getVersion(),
@@ -387,23 +376,33 @@ function startFlaskServer(proxyUrl) {
       detached: app.isPackaged && process.platform !== "win32",
       windowsHide: true,
     });
+    startupTimer = setTimeout(() => {
+      const error = new Error(`MediaDrop server did not report a ready port in time\n\n${stderrOutput}`);
+      stopProcessTree(flaskProcess);
+      finish(reject, error);
+    }, 15000);
 
     flaskProcess.on("error", (err) => {
-      reject(new Error(`Failed to start server: ${err.message}`));
+      finish(reject, new Error(`Failed to start server: ${err.message}`));
     });
 
     flaskProcess.on("close", (code) => {
-      if (code && code !== 0 && !mainWindow) {
-        reject(new Error(`Server process exited with code ${code}\n\n${stderrOutput}`));
+      if (!settled) {
+        finish(reject, new Error(`Server process exited with code ${code}\n\n${stderrOutput}`));
       }
     });
 
     flaskProcess.stderr.on("data", (data) => {
-      stderrOutput += data.toString();
+      stderrOutput = appendBoundedText(stderrOutput, data.toString());
       console.error(`Flask stderr: ${data}`);
+      const readyPort = parseServerReadyPort(stderrOutput);
+      if (!readinessStarted && readyPort) {
+        readinessStarted = true;
+        waitForServerReady(readyPort, flaskProcess)
+          .then(() => finish(resolve, readyPort))
+          .catch((error) => finish(reject, error));
+      }
     });
-
-    waitForPort(PORT).then(resolve).catch(reject);
   });
 }
 
@@ -433,8 +432,6 @@ function createWindow() {
     },
   });
 
-  // Cache-bust so Chromium always loads the latest template
-  mainWindow.webContents.session.clearCache().catch(() => {});
   const localOrigin = `http://127.0.0.1:${PORT}`;
   mainWindow.webContents.session.cookies.set({
     url: localOrigin,
@@ -442,7 +439,7 @@ function createWindow() {
     value: API_TOKEN,
     httpOnly: true,
     sameSite: "strict",
-  }).then(() => mainWindow.loadURL(`${localOrigin}?v=${Date.now()}`)).catch((error) => {
+  }).then(() => mainWindow.loadURL(localOrigin)).catch((error) => {
     console.error(`[security] Could not establish local session: ${error.message}`);
     app.quit();
   });
@@ -546,11 +543,8 @@ app.whenReady().then(async () => {
 
   try {
     const proxyUrl = detectProxy();
-    PORT = await findAvailablePort(DEFAULT_PORT);
-    if (PORT !== DEFAULT_PORT) {
-      console.log(`[port] ${DEFAULT_PORT} occupied, using ${PORT}`);
-    }
-    await startFlaskServer(proxyUrl);
+    PORT = await startFlaskServer(proxyUrl);
+    console.log(`[startup] Backend ready on port ${PORT}`);
     createWindow();
     const firstUpdateCheck = setTimeout(() => checkForAppUpdate(false), 30000);
     firstUpdateCheck.unref();
