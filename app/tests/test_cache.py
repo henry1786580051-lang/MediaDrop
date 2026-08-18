@@ -9,6 +9,7 @@ import pathlib
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -473,6 +474,125 @@ class CacheLifecycleTests(unittest.TestCase):
         self.assertEqual(os.listdir(server.get_cache_root()), [])
         self.assertNotIn("failed", server.active_downloads)
 
+    def test_transient_windows_style_failure_retries_and_preserves_partial(self):
+        class FailedProcess:
+            returncode = 1
+
+            def __init__(self):
+                self.stdout = iter([
+                    "ERROR: unable to download video data: HTTP Error 403: Forbidden"
+                ])
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+            def poll(self):
+                return self.returncode
+
+        commands = []
+        popen_options = []
+
+        def fail_after_partial(command, **kwargs):
+            commands.append(list(command))
+            popen_options.append(kwargs)
+            template = command[command.index("-o") + 1]
+            pathlib.Path(template.replace("%(ext)s", "mp4.part")).write_bytes(b"x" * 1024)
+            return FailedProcess()
+
+        server.jobs["transient"] = {
+            "status": "starting",
+            "progress": server.empty_progress(),
+        }
+        server.active_downloads.add("transient")
+        patches = [
+            mock.patch.object(server, "get_download_dir", return_value=self.download_dir),
+            mock.patch.object(server, "get_ytdlp_path", return_value="yt-dlp"),
+            mock.patch.object(server, "get_proxy_url", return_value=""),
+            mock.patch.object(server, "get_cookie_args", return_value=[]),
+            mock.patch.object(server, "get_ffmpeg_dir", return_value=None),
+            mock.patch.object(server, "get_ytdlp_env", return_value={}),
+            mock.patch.object(server.shutdown_event, "wait", return_value=False),
+            mock.patch.object(server.subprocess, "Popen", side_effect=fail_after_partial),
+        ]
+        for patcher in patches:
+            patcher.start()
+        try:
+            server.run_download(
+                "transient", "https://example.com/video", "video", None, "Example"
+            )
+        finally:
+            for patcher in reversed(patches):
+                patcher.stop()
+
+        job = server.jobs["transient"]
+        self.assertEqual(len(commands), 2)
+        self.assertIn("--force-ipv4", commands[1])
+        self.assertIn("--socket-timeout", commands[0])
+        self.assertIn("--fragment-retries", commands[0])
+        self.assertEqual(popen_options[0]["encoding"], "utf-8")
+        self.assertEqual(popen_options[0]["errors"], "replace")
+        self.assertEqual(job["status"], "error")
+        self.assertEqual(job["error_code"], "http_403")
+        self.assertTrue(job["resumable"])
+        self.assertTrue(pathlib.Path(job["cache_dir"]).is_dir())
+        self.assertNotIn("transient", server.active_downloads)
+
+    def test_failure_after_ten_mebibytes_retries_and_completes(self):
+        class Process:
+            def __init__(self, lines, returncode):
+                self.stdout = iter(lines)
+                self.returncode = returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+            def poll(self):
+                return self.returncode
+
+        attempts = 0
+
+        def fail_then_finish(command, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            template = command[command.index("-o") + 1]
+            if attempts == 1:
+                partial = pathlib.Path(template.replace("%(ext)s", "mp4.part"))
+                with partial.open("wb") as handle:
+                    handle.truncate(10 * 1024 * 1024)
+                return Process(["ERROR: connection reset by peer"], 1)
+            completed = pathlib.Path(template.replace("%(ext)s", "mp4"))
+            with completed.open("wb") as handle:
+                handle.truncate(11 * 1024 * 1024)
+            return Process([], 0)
+
+        server.jobs["ten-mib"] = {"status": "starting", "progress": server.empty_progress()}
+        server.active_downloads.add("ten-mib")
+        patches = [
+            mock.patch.object(server, "get_download_dir", return_value=self.download_dir),
+            mock.patch.object(server, "get_ytdlp_path", return_value="yt-dlp"),
+            mock.patch.object(server, "get_proxy_url", return_value=""),
+            mock.patch.object(server, "get_cookie_args", return_value=[]),
+            mock.patch.object(server, "get_ffmpeg_dir", return_value=None),
+            mock.patch.object(server, "get_ytdlp_env", return_value={}),
+            mock.patch.object(server.shutdown_event, "wait", return_value=False),
+            mock.patch.object(server.subprocess, "Popen", side_effect=fail_then_finish),
+        ]
+        for patcher in patches:
+            patcher.start()
+        try:
+            server.run_download(
+                "ten-mib", "https://example.com/video", "video", None, "Large Example"
+            )
+        finally:
+            for patcher in reversed(patches):
+                patcher.stop()
+
+        job = server.jobs["ten-mib"]
+        self.assertEqual(attempts, 2)
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(os.path.getsize(job["file"]), 11 * 1024 * 1024)
+        self.assertEqual(os.listdir(server.get_cache_root()), [])
+
     def test_successful_download_publishes_then_removes_cache(self):
         class SuccessfulProcess:
             stdout = iter([])
@@ -715,7 +835,25 @@ class PersistenceAndApiTests(unittest.TestCase):
         ):
             result = server.get_ytdlp_env()
 
-        self.assertEqual(result, {"PATH": "test-path"})
+        self.assertEqual(result, {
+            "PATH": "test-path",
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONUTF8": "1",
+        })
+
+    def test_electron_node_is_passed_to_ytdlp_as_javascript_runtime(self):
+        runtime = pathlib.Path(self.base_dir, "MediaDrop.exe")
+        runtime.write_bytes(b"electron")
+        source_env = {"PATH": "test-path", "MEDIADROP_JS_RUNTIME": str(runtime)}
+
+        with mock.patch.dict(server.os.environ, source_env, clear=True), \
+             mock.patch.object(server, "load_config", return_value={"proxy_url": ""}), \
+             mock.patch.object(server, "get_proxy_url", return_value=""):
+            args = server.get_ytdlp_javascript_args()
+            env = server.get_ytdlp_env()
+
+        self.assertEqual(args, ["--js-runtimes", f"node:{runtime}"])
+        self.assertEqual(env["ELECTRON_RUN_AS_NODE"], "1")
 
     def test_info_retries_without_browser_cookies_when_database_is_locked(self):
         failed = subprocess.CompletedProcess(
@@ -807,6 +945,67 @@ class PersistenceAndApiTests(unittest.TestCase):
         self.assertEqual(server.jobs[new_id]["format"], "audio")
         self.assertEqual(client.delete("/api/jobs/old").status_code, 200)
         self.assertNotIn("old", server.jobs)
+
+    def test_retry_reuses_resumable_job_and_partial_cache(self):
+        cache = pathlib.Path(server.get_job_cache_dir("resume-failure"))
+        (cache / "resume-failure.mp4.part").write_bytes(b"partial")
+        server.jobs["resume-failure"] = {
+            "status": "error",
+            "url": "https://example.com/video",
+            "format": "video",
+            "title": "Example",
+            "cache_dir": str(cache),
+            "resumable": True,
+            "error": "HTTP Error 403: Forbidden",
+            "progress": server.empty_progress(),
+            "created_at": 1,
+        }
+
+        with mock.patch.object(server, "process_download_queue"):
+            response = server.app.test_client().post("/api/jobs/resume-failure/retry")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["job_id"], "resume-failure")
+        self.assertEqual(server.jobs["resume-failure"]["status"], "queued")
+        self.assertTrue((cache / "resume-failure.mp4.part").is_file())
+        self.assertIn("resume-failure", server.download_queue)
+
+    def test_restore_preserves_resumable_failed_cache(self):
+        server.get_job_store().save("failed-resume", {
+            "status": "error",
+            "url": "https://example.com/video",
+            "format": "video",
+            "resumable": True,
+            "error": "connection reset",
+            "progress": server.empty_progress(),
+            "created_at": 1,
+        })
+        cache = pathlib.Path(server.get_job_cache_dir("failed-resume"))
+        (cache / "failed-resume.mp4.part").write_bytes(b"partial")
+
+        server.restore_jobs()
+
+        self.assertTrue(cache.is_dir())
+        self.assertTrue(server.jobs["failed-resume"]["resumable"])
+
+    def test_restore_removes_expired_resumable_cache(self):
+        server.get_job_store().save("expired-failure", {
+            "status": "error",
+            "url": "https://example.com/video",
+            "format": "video",
+            "resumable": True,
+            "error": "connection reset",
+            "completed_at": time.time() - server.RESUMABLE_CACHE_MAX_AGE_SECONDS - 1,
+            "progress": server.empty_progress(),
+            "created_at": 1,
+        })
+        cache = pathlib.Path(server.get_job_cache_dir("expired-failure"))
+        (cache / "expired-failure.mp4.part").write_bytes(b"partial")
+
+        server.restore_jobs()
+
+        self.assertFalse(cache.exists())
+        self.assertFalse(server.jobs["expired-failure"]["resumable"])
 
     def test_ytdlp_checksum_failure_preserves_current_binary(self):
         tools = pathlib.Path(self.base_dir) / "tools"

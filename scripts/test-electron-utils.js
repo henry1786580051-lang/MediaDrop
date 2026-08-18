@@ -10,6 +10,8 @@ const {
   selectReleaseAsset,
   stopProcessTree,
 } = require("../electron-utils");
+const { adHocSignApp } = require("./adhoc-sign");
+const { verifyMacAppSignature } = require("./verify-bundle");
 const { detectExecutableArchitecture } = require("./verify-ffmpeg");
 const fs = require("fs");
 const path = require("path");
@@ -68,6 +70,10 @@ assert(pyinstallerSpec.includes("('static', 'static')"), "PyInstaller no longer 
 const flaskSource = fs.readFileSync(path.join(__dirname, "..", "app", "app.py"), "utf8");
 assert(!flaskSource.includes("'unsafe-inline'"), "Content security policy still allows inline code");
 assert(flaskSource.includes("script-src 'self';") && flaskSource.includes("style-src 'self';"), "Strict local script and style policy is missing");
+const mainSource = fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8");
+assert(mainSource.includes("MEDIADROP_JS_RUNTIME: process.execPath"), "Electron is not exposed as yt-dlp's JavaScript runtime");
+assert(flaskSource.includes('"ELECTRON_RUN_AS_NODE"'), "yt-dlp JavaScript runtime mode is not enabled");
+assert(flaskSource.includes('"--js-runtimes"'), "yt-dlp commands do not receive the JavaScript runtime");
 
 const buildWorkflow = fs.readFileSync(path.join(__dirname, "..", ".github", "workflows", "build.yml"), "utf8");
 assert(!buildWorkflow.includes("node-version: 20"), "Release workflow still uses unsupported Node 20");
@@ -87,6 +93,39 @@ assert(macFfmpegBuild.includes("9fd092511605bbebafe095ea6d38d9e40f34d12f7386e125
 assert(macFfmpegBuild.includes("ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e"), "LAME source checksum is missing");
 assert(macFfmpegBuild.includes("--enable-libmp3lame"), "macOS FFmpeg build does not enable MP3 encoding");
 assert(buildWorkflow.includes("verify-ffmpeg.js bundled-bin/ffmpeg.exe"), "Windows FFmpeg architecture verification is missing");
+assert(buildWorkflow.includes("npm run verify:mac"), "macOS release artifacts are not verified before upload");
+
+const signCalls = [];
+adHocSignApp("/tmp/Media Drop.app", (executable, args) => signCalls.push([executable, args]));
+assert(signCalls.length === 5, "macOS signing pipeline did not run all required checks");
+assert(signCalls[0][0] === "/usr/bin/xattr" && signCalls[0][1][0] === "-cr", "macOS extended attributes are not cleared before signing");
+assert(signCalls[1][1].includes("com.apple.FinderInfo"), "macOS FinderInfo is not explicitly removed");
+assert(signCalls[2][1].includes("com.apple.ResourceFork"), "macOS resource forks are not explicitly removed");
+assert(signCalls[3][0] === "/usr/bin/codesign" && signCalls[3][1].includes("--sign"), "macOS app is not ad-hoc signed");
+assert(signCalls[4][1].includes("--verify") && signCalls[4][1].includes("--strict"), "macOS signature is not verified after signing");
+let signingFailurePropagated = false;
+try {
+  adHocSignApp("/tmp/MediaDrop.app", () => {
+    throw new Error("simulated signing failure");
+  });
+} catch (error) {
+  signingFailurePropagated = error.message === "simulated signing failure";
+}
+assert(signingFailurePropagated, "macOS signing failures can still be ignored");
+
+const verificationCalls = [];
+verifyMacAppSignature("/tmp/MediaDrop.app", (executable, args, options) => {
+  verificationCalls.push([executable, args, options]);
+});
+assert(verificationCalls[0][1].includes("--deep") && verificationCalls[0][1].includes("--strict"), "macOS bundle verification is incomplete");
+
+const localMacBuild = fs.readFileSync(path.join(__dirname, "build-macos.sh"), "utf8");
+assert(packageConfig.scripts["dist:mac"] === "bash scripts/build-macos.sh", "Local macOS build does not use the isolated build script");
+assert(localMacBuild.includes("mktemp -d") && localMacBuild.includes("-c.directories.output"), "Local macOS build is not isolated from File Provider metadata");
+assert(localMacBuild.includes("requirements-build.txt") && localMacBuild.includes("build-venv"), "Local macOS build does not use pinned Python dependencies");
+assert(localMacBuild.includes("verify-bundle.js") && localMacBuild.includes("hdiutil verify"), "Local macOS artifacts are not fully verified");
+const localBinaryBuild = fs.readFileSync(path.join(__dirname, "build-bin.sh"), "utf8");
+assert(localBinaryBuild.includes('PYTHON_BIN="${PYTHON_BIN:-python3}"'), "Local binary build cannot use the pinned build environment");
 
 const runtimeRequirements = fs.readFileSync(path.join(__dirname, "..", "app", "requirements.txt"), "utf8");
 const buildRequirements = fs.readFileSync(path.join(__dirname, "..", "app", "requirements-build.txt"), "utf8");

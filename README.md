@@ -74,12 +74,12 @@
 
 | 平台 | 架构 | 文件 |
 |------|------|------|
-| **macOS** | Apple Silicon (M1+) | `MediaDrop-*-arm64.dmg` |
+| **macOS** | Apple Silicon (M1+)，macOS 12 或更高版本 | `MediaDrop-*-arm64.dmg` |
 | **Windows** | x64（绝大多数电脑） | `MediaDrop.Setup.*.exe` |
 | **Windows** | ARM64（Surface 等） | `MediaDrop.Setup.*.arm64.exe` |
 
 > 💡 **不确定用哪个版本？**
-> - **Mac 用户**：下载 `.dmg` 文件（仅支持 Apple Silicon / M1+）
+> - **Mac 用户**：下载 `.dmg` 文件（仅支持 Apple Silicon / M1+，当前版本要求 macOS 12+）
 > - **Windows 用户**：下载不带 `arm64` 的 `.exe`（x64，兼容绝大多数 Windows 电脑）
 
 <details>

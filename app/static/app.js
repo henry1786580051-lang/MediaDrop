@@ -466,7 +466,10 @@ function friendlyError(err) {
   if (err.includes('Unsupported URL')) return '暂不支持此链接';
   if (err.includes('Video unavailable') || err.includes('not available')) return '视频不可用或属于私密内容';
   if (err.includes('Private video')) return '这是一个私密视频';
-  if (err.includes('HTTP Error 403')) return '访问被拒绝，请稍后重试';
+  if (err.includes('HTTP Error 403') || err.includes('403: Forbidden')) return '下载地址被拒绝；应用已自动重试。仍失败时请关闭 VPN/代理，或切换 Cookie 设置后重试';
+  if (err.includes('HTTP Error 429') || err.includes('Too Many Requests')) return '请求过于频繁，请稍等几分钟再重试并降低同时下载数量';
+  if (err.includes('No space left') || err.includes('not enough space')) return '磁盘空间不足，请清理空间后重试';
+  if (err.includes('being used by another process') || err.includes('WinError 32')) return '文件被其他程序占用，请检查安全软件或同步程序后重试';
   if (err.includes('HTTP Error 404')) return '未找到该视频';
   if (err.includes('Sign in to confirm')) return 'YouTube 需要登录认证，请在设置中选择已登录的浏览器或 cookies.txt';
   if (err.includes('Operation not permitted') && err.includes('Safari')) return '暂不支持 Safari，请登录 Chrome 或 Firefox 后在设置中选择对应浏览器';
@@ -845,7 +848,11 @@ function setVideoRangeMode(idx, mode) {
 async function dlCard(idx) {
   const c = cardData[idx];
   const requestedFormat = currentCardFormat(idx);
-  c.activeRequest = buildDownloadRequest(c, requestedFormat);
+  const requested = buildDownloadRequest(c, requestedFormat);
+  const resumeJobId = c.status === 'error' && c.resumable && c.jobId
+    && c.activeRequest && downloadRequestKey(c.activeRequest) === downloadRequestKey(requested)
+    ? c.jobId : null;
+  c.activeRequest = requested;
   c.status = 'downloading';
   c.error = null;
   c.progress = {};
@@ -853,10 +860,10 @@ async function dlCard(idx) {
   renderCard(idx);
 
   try {
-    const res = await fetch('/api/download', {
+    const res = await fetch(resumeJobId ? `/api/jobs/${encodeURIComponent(resumeJobId)}/retry` : '/api/download', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      headers: resumeJobId ? undefined : { 'Content-Type': 'application/json' },
+      body: resumeJobId ? undefined : JSON.stringify({
         url: c.url,
         format: c.activeRequest.format,
         format_id: c.activeRequest.formatId,
@@ -908,6 +915,7 @@ function pollCard(idx) {
           request: completedRequest,
         };
         c.status = 'done';
+        c.resumable = false;
         c.filename = data.filename;
         c.activeRequest = null;
         if (!notifiedJobs.has(c.jobId)) {
@@ -919,6 +927,7 @@ function pollCard(idx) {
         keepPolling = false;
         c.status = 'error';
         c.error = data.error;
+        c.resumable = Boolean(data.resumable);
         renderCard(idx);
       } else if (data.status === 'cancelled') {
         keepPolling = false;

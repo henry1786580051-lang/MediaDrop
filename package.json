@@ -1,6 +1,6 @@
 {
   "name": "mediadrop",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Self-hosted video and audio downloader",
   "author": "MediaDrop",
   "main": "main.js",
@@ -15,8 +15,9 @@
     "test:cache": "python3 -B -m unittest discover -s app/tests -v",
     "build:bin": "bash scripts/build-bin.sh",
     "verify:bundle": "node scripts/verify-bundle.js",
+    "verify:mac": "npm run verify:bundle && hdiutil verify dist/*.dmg",
     "dist": "electron-builder",
-    "dist:mac": "npm run build:bin && electron-builder --mac --arm64 -c.electronDist=node_modules/electron/dist && npm run verify:bundle"
+    "dist:mac": "bash scripts/build-macos.sh"
   },
   "build": {
     "publish": null,

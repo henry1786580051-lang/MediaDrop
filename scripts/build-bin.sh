@@ -7,13 +7,14 @@ BIN_DIST="$ROOT_DIR/bin-dist"
 BUNDLED_BIN="$ROOT_DIR/bundled-bin"
 YTDLP_VERSION="${YTDLP_VERSION:-2026.07.04}"
 FFMPEG_VERSION="8.1.2"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 rm -rf "$BIN_DIST/mediadrop-server" "$BUNDLED_BIN"
 mkdir -p "$BUNDLED_BIN"
 
 (
   cd "$APP_DIR"
-  python3 -m PyInstaller -y mediadrop-server.spec --distpath "$BIN_DIST"
+  "$PYTHON_BIN" -m PyInstaller -y mediadrop-server.spec --distpath "$BIN_DIST"
 )
 
 cp -R "$BIN_DIST/mediadrop-server/." "$BUNDLED_BIN/"

@@ -351,6 +351,9 @@ function startFlaskServer(proxyUrl) {
       HOST: "127.0.0.1",
       MEDIADROP_API_TOKEN: API_TOKEN,
       MEDIADROP_VERSION: app.getVersion(),
+      // Electron can run as a normal Node process. Reuse it for yt-dlp's
+      // YouTube JavaScript challenge solver instead of bundling another runtime.
+      MEDIADROP_JS_RUNTIME: process.execPath,
     };
     if (proxyUrl) flaskEnv.PROXY_URL = proxyUrl;
 

@@ -132,6 +132,10 @@ def handle_broken_pipe(e):
     return jsonify({"error": "Connection lost. Please try again."}), 400
 
 DEFAULT_MAX_CONCURRENT_DOWNLOADS = 2
+DOWNLOAD_PROCESS_ATTEMPTS = 2
+DOWNLOAD_LOG_LINE_LIMIT = 80
+DOWNLOAD_LOG_CHAR_LIMIT = 12000
+RESUMABLE_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
 API_TOKEN = os.environ.get("MEDIADROP_API_TOKEN", "")
 
 # Runtime task objects live in memory; serializable state is journaled to SQLite.
@@ -191,6 +195,9 @@ def job_payload(job_id, job):
         "filename": job.get("filename"),
         "file": job.get("file") if job.get("file") and os.path.isfile(job.get("file")) else None,
         "error": job.get("error"),
+        "error_code": job.get("error_code"),
+        "resumable": bool(job.get("resumable")),
+        "attempts": job.get("attempts", 0),
         "created_at": job.get("created_at"),
         "updated_at": job.get("updated_at"),
         "completed_at": job.get("completed_at"),
@@ -417,6 +424,10 @@ def cleanup_old_jobs():
         for job_id in removed_ids:
             jobs.pop(job_id, None)
     for job_id in removed_ids:
+        try:
+            cleanup_job_cache(get_job_cache_path(job_id))
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"[cleanup] Could not resolve cache for old job {job_id}: {exc}", file=sys.stderr, flush=True)
         get_job_store().delete(job_id)
     get_job_store().trim(keep=200)
 
@@ -924,6 +935,13 @@ def _is_within(path, root):
 
 def get_job_cache_dir(job_id):
     """Create an isolated cache directory for one download task."""
+    job_dir = get_job_cache_path(job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    return job_dir
+
+
+def get_job_cache_path(job_id):
+    """Return a validated task cache path without creating it."""
     safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(job_id))[:160]
     if not safe_id or safe_id in (".", ".."):
         raise ValueError("Invalid cache job ID")
@@ -931,7 +949,6 @@ def get_job_cache_dir(job_id):
     job_dir = os.path.join(root, safe_id)
     if not _is_within(job_dir, root) or os.path.realpath(job_dir) == root:
         raise ValueError("Cache path escaped its root")
-    os.makedirs(job_dir, exist_ok=True)
     return job_dir
 
 
@@ -987,6 +1004,7 @@ def restore_jobs():
     """Load recent history and requeue tasks interrupted by an app shutdown."""
     restored = []
     resumable = []
+    preserved = []
     changed = []
     for saved in reversed(get_job_store().load_recent(limit=200)):
         job_id = saved.pop("id")
@@ -1003,11 +1021,25 @@ def restore_jobs():
             saved["status"] = "missing"
             saved["file"] = None
             changed.append(job_id)
+        elif status == "error" and saved.get("resumable"):
+            cache_dir = get_job_cache_path(job_id)
+            try:
+                cache_timestamp = float(
+                    saved.get("completed_at") or saved.get("updated_at") or saved.get("created_at") or 0
+                )
+            except (TypeError, ValueError):
+                cache_timestamp = 0
+            cache_age = time.time() - cache_timestamp
+            if cache_age <= RESUMABLE_CACHE_MAX_AGE_SECONDS and cache_has_partial_download(cache_dir):
+                preserved.append(job_id)
+            else:
+                saved["resumable"] = False
+                changed.append(job_id)
         with jobs_lock:
             jobs[job_id] = saved
         restored.append(job_id)
 
-    cleanup_cache_root(preserve_ids=resumable)
+    cleanup_cache_root(preserve_ids=resumable + preserved)
     with queue_lock:
         download_queue.extend(resumable)
     for job_id in changed:
@@ -1129,6 +1161,10 @@ def get_ytdlp_env():
     """
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    if get_ytdlp_javascript_args():
+        env["ELECTRON_RUN_AS_NODE"] = "1"
     configured_proxy = str(load_config().get("proxy_url", "") or "")
     proxy = get_proxy_url()
     if configured_proxy and not proxy:
@@ -1138,6 +1174,13 @@ def get_ytdlp_env():
         env["http_proxy"] = proxy
         env["https_proxy"] = proxy
     return env
+
+
+def get_ytdlp_javascript_args():
+    runtime = str(os.environ.get("MEDIADROP_JS_RUNTIME", "") or "").strip()
+    if runtime and os.path.isfile(runtime):
+        return ["--js-runtimes", f"node:{runtime}"]
+    return []
 
 
 def run_ytdlp_version(path):
@@ -1288,6 +1331,154 @@ def process_download_queue():
             thread.start()
 
 
+def append_download_log(lines, line):
+    """Keep a bounded diagnostic tail without retaining progress JSON."""
+    line = str(line or "").strip()
+    if not line:
+        return
+    lines.append(line[:2000])
+    while len(lines) > DOWNLOAD_LOG_LINE_LIMIT:
+        lines.pop(0)
+    while lines and sum(len(item) + 1 for item in lines) > DOWNLOAD_LOG_CHAR_LIMIT:
+        lines.pop(0)
+
+
+def classify_download_failure(lines, returncode):
+    detail = "\n".join(lines)[-DOWNLOAD_LOG_CHAR_LIMIT:]
+    lowered = detail.lower()
+    rules = (
+        ("storage_full", ("no space left", "not enough space", "disk full", "errno 28"), False),
+        (
+            "file_access",
+            (
+                "permission denied",
+                "access is denied",
+                "being used by another process",
+                "winerror 5",
+                "winerror 32",
+            ),
+            False,
+        ),
+        (
+            "authentication",
+            ("sign in to confirm", "private video", "members-only", "login required"),
+            False,
+        ),
+        ("rate_limited", ("http error 429", "too many requests"), True),
+        ("http_403", ("http error 403", "403: forbidden"), True),
+        (
+            "network",
+            (
+                "timed out",
+                "timeout",
+                "connection reset",
+                "connection aborted",
+                "connection refused",
+                "remote end closed",
+                "incompleteread",
+                "incomplete read",
+                "network is unreachable",
+                "temporary failure",
+                "name resolution",
+                "unable to download video data",
+                "unable to download webpage",
+                "tls",
+            ),
+            True,
+        ),
+        (
+            "fragment",
+            ("fragment not found", "fragment retries exhausted", "giving up after", "unable to continue"),
+            True,
+        ),
+        ("unsupported", ("unsupported url", "video unavailable", "copyright", "geo-restricted"), False),
+    )
+    error_code = "downloader"
+    retryable = False
+    for candidate, markers, can_retry in rules:
+        if any(marker in lowered for marker in markers):
+            error_code = candidate
+            retryable = can_retry
+            break
+
+    error_lines = [line for line in lines if "error" in line.lower()]
+    message = error_lines[-1] if error_lines else (
+        lines[-1] if lines else f"Download failed (code {returncode})"
+    )
+    return {
+        "code": error_code,
+        "retryable": retryable,
+        "message": message,
+        "detail": detail,
+    }
+
+
+def cache_has_partial_download(job_cache_dir):
+    try:
+        entries = os.scandir(job_cache_dir)
+    except OSError:
+        return False
+    with entries:
+        for entry in entries:
+            try:
+                if entry.is_file(follow_symlinks=False) and entry.stat(follow_symlinks=False).st_size > 0:
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def run_ytdlp_download_process(job_id, job, cmd, estimator):
+    diagnostic_lines = []
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+        env=get_ytdlp_env(),
+        start_new_session=sys.platform != "win32",
+    )
+    job["proc"] = proc
+    job["paused"] = False
+
+    for line in proc.stdout:
+        line = line.strip()
+        if not line:
+            continue
+        structured = parse_structured_progress(line)
+        if structured and not job.get("paused"):
+            job["progress"] = estimator.update(structured)
+            job["status"] = "downloading"
+            persist_job(job_id)
+            continue
+
+        if POSTPROCESS_PREFIX in line:
+            if estimator.phase == "downloading":
+                job["progress"] = estimator.set_phase("postprocessing")
+                persist_job(job_id)
+            continue
+
+        append_download_log(diagnostic_lines, line)
+        if "[Merger]" in line:
+            job["progress"] = estimator.set_phase("merging")
+        elif "[ExtractAudio]" in line:
+            job["progress"] = estimator.set_phase("converting_audio")
+        elif "[ThumbnailsConvertor]" in line:
+            job["progress"] = estimator.set_phase("converting_thumbnail")
+        else:
+            legacy = parse_progress(line)
+            if legacy and not job.get("paused"):
+                job["progress"] = estimator.update(legacy)
+                job["status"] = "downloading"
+
+    proc.wait()
+    job["proc"] = None
+    return proc.returncode, diagnostic_lines
+
+
 def run_download(
     job_id,
     url,
@@ -1323,9 +1514,18 @@ def run_download(
         "--progress-delta", "0.5",
         "--progress-template", f"download:{PROGRESS_PREFIX}%(progress)j",
         "--progress-template", f"postprocess:{POSTPROCESS_PREFIX}%(progress)j",
+        "--no-colors",
+        "--socket-timeout", "30",
+        "--retries", "10",
+        "--fragment-retries", "10",
+        "--file-access-retries", "5",
+        "--retry-sleep", "http:linear=1:5:1",
+        "--retry-sleep", "fragment:linear=1:5:1",
+        "--retry-sleep", "file_access:1",
         "-c",
         "-o", out_template,
     ]
+    cmd += get_ytdlp_javascript_args()
 
     # Pass --proxy flag directly to yt-dlp in addition to env vars,
     # because some yt-dlp extractors ignore env vars and only respect --proxy.
@@ -1389,54 +1589,40 @@ def run_download(
 
     try:
         print(f"[download] Starting download (format={format_choice})", file=sys.stderr, flush=True)
-        last_lines = []
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            env=get_ytdlp_env(),
-            start_new_session=sys.platform != "win32",
-        )
-        job["proc"] = proc
-        job["paused"] = False
         estimator = DownloadProgressEstimator()
         job["estimator"] = estimator
-
-        for line in proc.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            last_lines.append(line)
-            if len(last_lines) > 10:
-                last_lines.pop(0)
-            structured = parse_structured_progress(line)
-            if structured and not job.get("paused"):
-                job["progress"] = estimator.update(structured)
-                job["status"] = "downloading"
-                persist_job(job_id)
-                continue
-
-            if POSTPROCESS_PREFIX in line:
-                if estimator.phase == "downloading":
-                    job["progress"] = estimator.set_phase("postprocessing")
-                    persist_job(job_id)
-                continue
-
-            if "[Merger]" in line:
-                job["progress"] = estimator.set_phase("merging")
-            elif "[ExtractAudio]" in line:
-                job["progress"] = estimator.set_phase("converting_audio")
-            elif "[ThumbnailsConvertor]" in line:
-                job["progress"] = estimator.set_phase("converting_thumbnail")
-            else:
-                legacy = parse_progress(line)
-                if legacy and not job.get("paused"):
-                    job["progress"] = estimator.update(legacy)
-                    job["status"] = "downloading"
-
-        proc.wait()
+        job["error"] = None
+        job["error_code"] = None
+        job["resumable"] = False
+        failure = None
+        returncode = 1
+        attempt_cmd = list(cmd)
+        for attempt in range(1, DOWNLOAD_PROCESS_ATTEMPTS + 1):
+            job["attempts"] = attempt
+            returncode, diagnostic_lines = run_ytdlp_download_process(
+                job_id, job, attempt_cmd, estimator
+            )
+            if returncode == 0:
+                failure = None
+                break
+            failure = classify_download_failure(diagnostic_lines, returncode)
+            if not failure["retryable"] or attempt >= DOWNLOAD_PROCESS_ATTEMPTS:
+                break
+            if failure["code"] == "http_403" and not proxy and "--force-ipv4" not in attempt_cmd:
+                attempt_cmd = attempt_cmd[:-1] + ["--force-ipv4", attempt_cmd[-1]]
+            delay = 15 if failure["code"] == "rate_limited" else 3
+            job["status"] = "starting"
+            job["error_code"] = failure["code"]
+            job["error_detail"] = failure["detail"]
+            persist_job(job_id, force=True)
+            print(
+                f"[download] Retrying whole download after {failure['code']} "
+                f"(attempt {attempt + 1}/{DOWNLOAD_PROCESS_ATTEMPTS})",
+                file=sys.stderr,
+                flush=True,
+            )
+            if shutdown_event.wait(delay):
+                return
 
         if shutdown_event.is_set() and job.get("status") == "interrupted":
             return
@@ -1445,11 +1631,19 @@ def run_download(
         if job.get("status") == "cancelled":
             return
 
-        if proc.returncode != 0:
+        if returncode != 0:
             job["status"] = "error"
-            err_lines = [l for l in last_lines if "ERROR" in l or "error" in l.lower()]
-            job["error"] = err_lines[-1] if err_lines else "\n".join(last_lines[-3:])
-            print(f"[download] Failed (code {proc.returncode}): {job['error']}", file=sys.stderr, flush=True)
+            failure = failure or classify_download_failure([], returncode)
+            job["error"] = failure["message"]
+            job["error_code"] = failure["code"]
+            job["error_detail"] = failure["detail"]
+            job["resumable"] = bool(
+                failure["retryable"]
+                and format_choice != "image"
+                and cache_has_partial_download(job_cache_dir)
+            )
+            job["completed_at"] = time.time()
+            print(f"[download] Failed (code {returncode}): {job['error']}", file=sys.stderr, flush=True)
             persist_job(job_id, force=True)
             return
 
@@ -1475,6 +1669,9 @@ def run_download(
         )
 
         job["status"] = "done"
+        job["error_code"] = None
+        job["error_detail"] = None
+        job["resumable"] = False
         job["file"] = chosen
         job["filename"] = friendly_name
         job["progress"]["percent"] = 100.0
@@ -1489,11 +1686,13 @@ def run_download(
         if job.get("status") != "cancelled":
             job["status"] = "error"
             job["error"] = str(e)
+            job["error_code"] = "application"
+            job["resumable"] = False
             persist_job(job_id, force=True)
     finally:
         if job.get("status") in ("done", "error", "cancelled", "missing"):
             persist_job(job_id, force=True)
-        if job.get("status") != "interrupted":
+        if job.get("status") != "interrupted" and not job.get("resumable"):
             cleanup_job_cache(job_cache_dir)
         with queue_lock:
             active_downloads.discard(job_id)
@@ -1582,7 +1781,9 @@ def get_info():
         return jsonify({"error": "Invalid URL"}), 400
 
     try:
-        cmd = [get_ytdlp_path(), "--no-playlist", "-j", url]
+        cmd = [get_ytdlp_path(), "--no-playlist", "-j"]
+        cmd += get_ytdlp_javascript_args()
+        cmd.append(url)
         proxy = get_proxy_url()
         if proxy:
             cmd += ["--proxy", proxy]
@@ -1756,6 +1957,8 @@ def check_status(job_id):
     resp = {
         "status": job["status"],
         "error": job.get("error"),
+        "error_code": job.get("error_code"),
+        "resumable": bool(job.get("resumable")),
         "filename": job.get("filename"),
         "progress": job.get("progress", {}),
     }
@@ -1869,19 +2072,36 @@ def retry_job(job_id):
         source = jobs.get(job_id)
         if not source or source.get("status") not in ("done", "error", "cancelled", "missing"):
             return jsonify({"error": "Task cannot be retried"}), 400
-        new_id = f"retry_{time.time_ns()}_{uuid.uuid4().hex[:8]}"
-        jobs[new_id] = {
-            "status": "queued",
-            "url": source.get("url", ""),
-            "format": source.get("format", "video"),
-            "format_id": source.get("format_id"),
-            "video_range_mode": source.get("video_range_mode", "auto"),
-            "title": source.get("title", ""),
-            "preset": source.get("preset", "recommended"),
-            "options": source.get("options") or {},
-            "progress": empty_progress(),
-            "created_at": time.time(),
-        }
+        can_resume = bool(source.get("status") == "error" and source.get("resumable"))
+        resume_cache_dir = get_job_cache_dir(job_id) if can_resume else ""
+        if can_resume and cache_has_partial_download(resume_cache_dir):
+            source["cache_dir"] = resume_cache_dir
+            source["status"] = "queued"
+            source["error"] = None
+            source["error_code"] = None
+            source["resumed"] = True
+            source["progress"] = empty_progress()
+            source["completed_at"] = None
+            source["attempts"] = 0
+            source.pop("proc", None)
+            source.pop("estimator", None)
+            new_id = job_id
+        else:
+            new_id = f"retry_{time.time_ns()}_{uuid.uuid4().hex[:8]}"
+            jobs[new_id] = {
+                "status": "queued",
+                "url": source.get("url", ""),
+                "format": source.get("format", "video"),
+                "format_id": source.get("format_id"),
+                "video_range_mode": source.get("video_range_mode", "auto"),
+                "title": source.get("title", ""),
+                "preset": source.get("preset", "recommended"),
+                "options": source.get("options") or {},
+                "progress": empty_progress(),
+                "resumable": False,
+                "attempts": 0,
+                "created_at": time.time(),
+            }
     persist_job(new_id, force=True)
     with queue_lock:
         download_queue.append(new_id)
@@ -1948,7 +2168,9 @@ def test_cookies():
     if not is_valid_url(url):
         return jsonify({"error": "Invalid URL"}), 400
 
-    cmd = [get_ytdlp_path(), "--no-playlist", "--simulate", "--skip-download", "--dump-json", url]
+    cmd = [get_ytdlp_path(), "--no-playlist", "--simulate", "--skip-download", "--dump-json"]
+    cmd += get_ytdlp_javascript_args()
+    cmd.append(url)
     proxy = get_proxy_url()
     if proxy:
         cmd += ["--proxy", proxy]
@@ -2017,6 +2239,9 @@ def diagnostics():
         "platform": platform.platform(),
         "python": platform.python_version(),
         "yt_dlp": run_ytdlp_version(get_ytdlp_path()),
+        "javascript_runtime": _command_version([
+            os.environ.get("MEDIADROP_JS_RUNTIME", ""), "-p", "process.versions.node"
+        ]) if get_ytdlp_javascript_args() else None,
         "ffmpeg": _command_version([
             os.path.join(get_ffmpeg_dir(), "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")
             if get_ffmpeg_dir() else "ffmpeg",
@@ -2036,6 +2261,10 @@ def diagnostics():
                 "format": job.get("format"),
                 "preset": job.get("preset"),
                 "error": job.get("error"),
+                "error_code": job.get("error_code"),
+                "error_detail": job.get("error_detail"),
+                "resumable": bool(job.get("resumable")),
+                "attempts": job.get("attempts", 0),
                 "created_at": job.get("created_at"),
             }
             for job_id, job in recent
