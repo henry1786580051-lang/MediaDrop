@@ -82,9 +82,12 @@ assert(buildWorkflow.includes("pip install -r app/requirements-build.txt"), "Rel
 assert(!buildWorkflow.includes("pip install flask pyinstaller"), "Release workflow still installs moving Python build dependencies");
 assert(buildWorkflow.includes("FFMPEG_VERSION: '8.1.2'"), "Release workflow FFmpeg version is not pinned");
 assert(!buildWorkflow.includes("ffmpeg-master-latest"), "Release workflow still uses a moving FFmpeg master build");
-assert(buildWorkflow.includes("ffmpeg-n8.1-latest-${{ matrix.ffmpeg_arch }}-gpl-8.1.zip"), "Windows FFmpeg stable asset is missing");
-assert(buildWorkflow.includes("9f4b7be573fc9a7ade892224b756f7ae733b49c4eba46c2eab77c1a76b9f36a2"), "Windows x64 FFmpeg checksum is missing");
-assert(buildWorkflow.includes("11b5555e29b71908d88959f34d79c1e356f7ff6ee349c066f899146245d51bc7"), "Windows ARM64 FFmpeg checksum is missing");
+assert(buildWorkflow.includes("FFMPEG_WINDOWS_RELEASE: 'autobuild-2026-08-17-13-05'"), "Windows FFmpeg release is not immutable");
+assert(!buildWorkflow.includes("releases/download/latest/${ASSET}"), "Windows FFmpeg download still uses a moving release");
+assert(buildWorkflow.includes("ffmpeg-n8.1.2-44-g7c533d0f86-win64-gpl-8.1.zip"), "Windows x64 FFmpeg asset is missing");
+assert(buildWorkflow.includes("ffmpeg-n8.1.2-44-g7c533d0f86-winarm64-gpl-8.1.zip"), "Windows ARM64 FFmpeg asset is missing");
+assert(buildWorkflow.includes("19b9b43e6df8839473ba22c8e22bf14b937c1e2ca40ecbd19d58afedc83ac908"), "Windows x64 FFmpeg checksum is missing");
+assert(buildWorkflow.includes("bedbdfaf298650e9fc25f35c14e948db37b969d7a3bf973e7b6861ef62444031"), "Windows ARM64 FFmpeg checksum is missing");
 
 const macFfmpegBuild = fs.readFileSync(path.join(__dirname, "build-ffmpeg-macos.sh"), "utf8");
 assert(macFfmpegBuild.includes("FFMPEG_VERSION=\"8.1.2\""), "macOS FFmpeg version is not pinned");

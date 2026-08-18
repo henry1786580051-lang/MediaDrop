@@ -3,6 +3,7 @@ name: Build & Release
 env:
   YTDLP_VERSION: '2026.07.04'
   FFMPEG_VERSION: '8.1.2'
+  FFMPEG_WINDOWS_RELEASE: 'autobuild-2026-08-17-13-05'
 
 on:
   push:
@@ -119,12 +120,12 @@ jobs:
         include:
           - arch: x64
             runner: windows-latest
-            ffmpeg_arch: win64
-            ffmpeg_sha256: 9f4b7be573fc9a7ade892224b756f7ae733b49c4eba46c2eab77c1a76b9f36a2
+            ffmpeg_asset: ffmpeg-n8.1.2-44-g7c533d0f86-win64-gpl-8.1.zip
+            ffmpeg_sha256: 19b9b43e6df8839473ba22c8e22bf14b937c1e2ca40ecbd19d58afedc83ac908
           - arch: arm64
             runner: windows-11-arm
-            ffmpeg_arch: winarm64
-            ffmpeg_sha256: 11b5555e29b71908d88959f34d79c1e356f7ff6ee349c066f899146245d51bc7
+            ffmpeg_asset: ffmpeg-n8.1.2-44-g7c533d0f86-winarm64-gpl-8.1.zip
+            ffmpeg_sha256: bedbdfaf298650e9fc25f35c14e948db37b969d7a3bf973e7b6861ef62444031
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -163,8 +164,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p bundled-bin
-          ASSET="ffmpeg-n8.1-latest-${{ matrix.ffmpeg_arch }}-gpl-8.1.zip"
-          curl --fail --location --retry 3 -o ffmpeg.zip "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/${ASSET}"
+          ASSET="${{ matrix.ffmpeg_asset }}"
+          curl --fail --location --retry 3 -o ffmpeg.zip "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_WINDOWS_RELEASE}/${ASSET}"
           printf '%s  %s\n' '${{ matrix.ffmpeg_sha256 }}' ffmpeg.zip | sha256sum -c -
           7z x ffmpeg.zip -obundled-ffmpeg
           cp bundled-ffmpeg/*/bin/ffmpeg.exe bundled-bin/ffmpeg.exe
