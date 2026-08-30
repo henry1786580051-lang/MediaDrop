@@ -16,7 +16,7 @@ function verifyMacAppSignature(appPath, commandRunner = execFileSync) {
 
 function verifyBundle(appPath = defaultAppPath) {
   const appBinDir = path.join(appPath, "Contents", "Resources", "bin");
-  const required = ["mediadrop-server", "yt-dlp", "ffmpeg"];
+  const required = ["mediadrop-server", "yt-dlp", "ffmpeg", "ffprobe"];
 
   for (const name of required) {
     const file = path.join(appBinDir, name);

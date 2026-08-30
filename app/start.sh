@@ -15,6 +15,8 @@ fi
 
 if ! command -v ffmpeg &> /dev/null; then
     missing="$missing ffmpeg"
+elif ! command -v ffprobe &> /dev/null; then
+    missing="$missing ffmpeg"
 fi
 
 if [ -n "$missing" ]; then

@@ -26,9 +26,11 @@ from flask import Flask, request, jsonify, send_file, render_template, redirect,
 from werkzeug.serving import make_server
 
 try:
-    from job_store import JobStore
+    from data_lock import DataDirectoryLock
+    from job_store import ACTIVE_STATUSES, JobStore, is_recoverable_job
 except ImportError:
-    from app.job_store import JobStore
+    from app.data_lock import DataDirectoryLock
+    from app.job_store import ACTIVE_STATUSES, JobStore, is_recoverable_job
 
 
 def get_base_dir():
@@ -97,14 +99,13 @@ def get_bundled_ytdlp_path():
 
 
 def get_ytdlp_path():
-    """Return preferred yt-dlp path: user-updated, bundled, then system PATH."""
-    updated = get_updatable_ytdlp_path()
-    if updated:
-        return updated
-    bundled = get_bundled_ytdlp_path()
-    if bundled:
-        return bundled
-    return "yt-dlp"
+    """Use the newest working managed binary, preferring bundled on a tie."""
+    selected, selected_version = None, None
+    for candidate in (get_bundled_ytdlp_path(), get_updatable_ytdlp_path()):
+        version = cached_ytdlp_version(candidate)
+        if version and (selected_version is None or compare_version_strings(version, selected_version) > 0):
+            selected, selected_version = candidate, version
+    return selected or "yt-dlp"
 
 
 def get_ffmpeg_dir():
@@ -147,10 +148,49 @@ config_lock = threading.RLock()
 queue_lock = threading.Lock()
 filename_lock = threading.Lock()
 store_lock = threading.Lock()
+persistence_lock = threading.Lock()
+ytdlp_version_lock = threading.Lock()
+_ytdlp_version_cache = {}
 CACHE_DIR_NAME = ".mediadrop-cache"
 shutdown_event = threading.Event()
 _job_store = None
 _job_store_path = None
+
+
+class DownloadStopped(Exception):
+    pass
+
+
+def get_download_stop_event(job):
+    with jobs_lock:
+        if "_stop_event" not in job:
+            job["_stop_event"] = threading.Event()
+        return job["_stop_event"]
+
+
+def download_stopped(job):
+    return shutdown_event.is_set() or job.get("status") in ("cancelled", "interrupted") or (
+        job.get("_stop_event") is not None and job["_stop_event"].is_set()
+    )
+
+
+def ensure_download_active(job):
+    if job is not None and download_stopped(job):
+        raise DownloadStopped()
+
+
+def wait_for_download_retry(job, delay):
+    return get_download_stop_event(job).wait(delay) or download_stopped(job)
+
+
+def mark_download_done(job, path, filename):
+    job.update({
+        "status": "done", "error": None, "error_code": None, "error_detail": None,
+        "resumable": False, "file": path, "filename": filename, "completed_at": time.time(),
+    })
+    progress = dict(job.get("progress") or empty_progress())
+    progress.update({"percent": 100.0, "eta": None, "eta_seconds": None, "phase": "complete", "state": "complete"})
+    job["progress"] = progress
 
 
 def get_job_store():
@@ -164,19 +204,22 @@ def get_job_store():
 
 
 def persist_job(job_id, force=False):
-    now = time.monotonic()
-    with jobs_lock:
-        job = jobs.get(job_id)
-        if not job:
-            return
-        if not force and now - job.get("_last_persist", 0) < 2:
-            return
-        job.setdefault("created_at", time.time())
-        snapshot = dict(job)
-    get_job_store().save(job_id, snapshot)
-    with jobs_lock:
-        if jobs.get(job_id) is job:
-            job["_last_persist"] = now
+    # Serialize snapshots as well as writes so late progress cannot overwrite
+    # a newer cancellation or completed state in the journal.
+    with persistence_lock:
+        now = time.monotonic()
+        with jobs_lock:
+            job = jobs.get(job_id)
+            if not job:
+                return
+            if not force and now - job.get("_last_persist", 0) < 2:
+                return
+            job.setdefault("created_at", time.time())
+            snapshot = dict(job)
+        get_job_store().save(job_id, snapshot)
+        with jobs_lock:
+            if jobs.get(job_id) is job:
+                job["_last_persist"] = now
 
 
 def job_payload(job_id, job):
@@ -235,16 +278,24 @@ def apply_security_headers(response):
 
 def cleanup_all_jobs():
     """Stop child processes while preserving resumable task caches."""
-    if shutdown_event.is_set():
-        return
-    shutdown_event.set()
-    with jobs_lock:
+    with queue_lock, jobs_lock:
+        if shutdown_event.is_set():
+            return
+        shutdown_event.set()
         job_items = list(jobs.items())
+        interrupted_ids = set()
+        for job_id, job in job_items:
+            if job.get("status") not in ("done", "error", "cancelled", "missing"):
+                job["status"] = "interrupted"
+                job["error"] = None
+                get_download_stop_event(job).set()
+                interrupted_ids.add(job_id)
     for job_id, job in job_items:
-        if job.get("status") not in ("done", "error", "cancelled", "missing"):
-            job["status"] = "interrupted"
-            job["error"] = None
-            persist_job(job_id, force=True)
+        if job_id in interrupted_ids:
+            try:
+                persist_job(job_id, force=True)
+            except Exception as exc:
+                print(f"[cleanup] Could not save task state: {exc}", file=sys.stderr, flush=True)
         proc = job.get("proc")
         if proc and proc.poll() is None:
             try:
@@ -409,18 +460,18 @@ def terminate_process_tree(proc):
 
 def cleanup_old_jobs():
     """Bound runtime and journal history without removing active tasks."""
-    with jobs_lock:
-        if len(jobs) <= 250:
-            return
+    with queue_lock, jobs_lock:
         terminal = sorted(
             (
                 (job_id, job)
                 for job_id, job in jobs.items()
-                if job.get("status") in ("done", "error", "cancelled", "missing")
+                if job_id not in active_downloads and not is_recoverable_job(job)
             ),
             key=lambda item: item[1].get("created_at", 0),
         )
-        removed_ids = [job_id for job_id, _job in terminal[:max(0, len(jobs) - 200)]]
+        if len(terminal) <= 250:
+            return
+        removed_ids = [job_id for job_id, _job in terminal[:-200]]
         for job_id in removed_ids:
             jobs.pop(job_id, None)
     for job_id in removed_ids:
@@ -428,7 +479,8 @@ def cleanup_old_jobs():
             cleanup_job_cache(get_job_cache_path(job_id))
         except (OSError, RuntimeError, ValueError) as exc:
             print(f"[cleanup] Could not resolve cache for old job {job_id}: {exc}", file=sys.stderr, flush=True)
-        get_job_store().delete(job_id)
+        with persistence_lock:
+            get_job_store().delete(job_id)
     get_job_store().trim(keep=200)
 
 
@@ -1006,11 +1058,11 @@ def restore_jobs():
     resumable = []
     preserved = []
     changed = []
-    for saved in reversed(get_job_store().load_recent(limit=200)):
+    for saved in reversed(get_job_store().load_for_restore(history_limit=200)):
         job_id = saved.pop("id")
         status = saved.get("status", "error")
         saved["progress"] = saved.get("progress") or empty_progress()
-        if status in ("queued", "starting", "downloading", "paused", "interrupted"):
+        if status in ACTIVE_STATUSES:
             saved["status"] = "queued"
             saved["progress"] = empty_progress()
             saved["error"] = None
@@ -1031,6 +1083,7 @@ def restore_jobs():
                 cache_timestamp = 0
             cache_age = time.time() - cache_timestamp
             if cache_age <= RESUMABLE_CACHE_MAX_AGE_SECONDS and cache_has_partial_download(cache_dir):
+                saved["cache_dir"] = cache_dir
                 preserved.append(job_id)
             else:
                 saved["resumable"] = False
@@ -1083,7 +1136,25 @@ def _link_without_overwrite(source, directory, base_name, ext):
             counter += 1
 
 
-def finalize_cached_file(source, download_dir, title, ext, job_id):
+def publish_cached_file(source, download_dir, base_name, ext, job, allow_replace=False):
+    # Cancellation and the final file commit must agree on a single outcome.
+    with jobs_lock, filename_lock:
+        ensure_download_active(job)
+        try:
+            path, filename = _link_without_overwrite(source, download_dir, base_name, ext)
+        except OSError as exc:
+            if not allow_replace or exc.errno not in (errno.EPERM, errno.EACCES, errno.ENOTSUP):
+                raise
+            path, filename = make_unique_filename(download_dir, base_name, ext)
+            if os.path.exists(path):
+                raise FileExistsError(path)
+            os.replace(source, path)
+        if job is not None:
+            mark_download_done(job, path, filename)
+        return path, filename
+
+
+def finalize_cached_file(source, download_dir, title, ext, job_id, job=None):
     """Commit a completed cache file without exposing a partial destination file."""
     cache_root = get_cache_root()
     source = os.path.realpath(source)
@@ -1096,8 +1167,7 @@ def finalize_cached_file(source, download_dir, title, ext, job_id):
     # Hard links are atomic, cannot overwrite existing files, and avoid copying
     # when app data and the download folder share a filesystem.
     try:
-        with filename_lock:
-            final_path, friendly_name = _link_without_overwrite(source, download_dir, base_name, ext)
+        final_path, friendly_name = publish_cached_file(source, download_dir, base_name, ext, job)
     except OSError as exc:
         if exc.errno not in (errno.EXDEV, errno.EPERM, errno.EACCES, errno.ENOTSUP):
             raise
@@ -1114,23 +1184,17 @@ def finalize_cached_file(source, download_dir, title, ext, job_id):
     fd, temp_path = tempfile.mkstemp(prefix=f".mediadrop-{safe_job_id}-", suffix=".tmp", dir=download_dir)
     try:
         with os.fdopen(fd, "wb") as target, open(source, "rb") as cached:
-            shutil.copyfileobj(cached, target, length=1024 * 1024)
+            while True:
+                ensure_download_active(job)
+                chunk = cached.read(1024 * 1024)
+                if not chunk:
+                    break
+                target.write(chunk)
             target.flush()
             os.fsync(target.fileno())
-        try:
-            with filename_lock:
-                final_path, friendly_name = _link_without_overwrite(temp_path, download_dir, base_name, ext)
-        except OSError as exc:
-            if exc.errno not in (errno.EPERM, errno.EACCES, errno.ENOTSUP):
-                raise
-            # Filesystems without hard-link support fall back to an atomic replace
-            # while holding the process-wide filename lock.
-            with filename_lock:
-                final_path, friendly_name = make_unique_filename(download_dir, base_name, ext)
-                if os.path.exists(final_path):
-                    raise FileExistsError(final_path)
-                os.replace(temp_path, final_path)
-                temp_path = None
+        final_path, friendly_name = publish_cached_file(
+            temp_path, download_dir, base_name, ext, job, allow_replace=True
+        )
         try:
             os.unlink(source)
         except OSError:
@@ -1185,12 +1249,37 @@ def get_ytdlp_javascript_args():
 
 def run_ytdlp_version(path):
     try:
-        result = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=20, env=get_ytdlp_env())
+        result = subprocess.run(
+            [path, "--version"], capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=20, env=get_ytdlp_env(),
+        )
         if result.returncode == 0:
             return result.stdout.strip()
         return None
     except Exception:
         return None
+
+
+def cached_ytdlp_version(path):
+    if not path:
+        return None
+    resolved = os.path.abspath(path) if os.path.dirname(path) else shutil.which(path)
+    if not resolved:
+        return None
+    try:
+        stat = os.stat(resolved)
+    except OSError:
+        return None
+    fingerprint = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_mode)
+    with ytdlp_version_lock:
+        cached = _ytdlp_version_cache.get(resolved)
+        if cached and cached[0] == fingerprint and (cached[1] or time.monotonic() - cached[2] < 5):
+            return cached[1]
+        version = run_ytdlp_version(resolved)
+        if not version or not re.fullmatch(r"\d{4}\.\d{1,2}\.\d{1,2}(?:\.\d+)?", version):
+            version = None
+        _ytdlp_version_cache[resolved] = (fingerprint, version, time.monotonic())
+        return version
 
 
 def get_latest_ytdlp_release():
@@ -1226,9 +1315,11 @@ def compare_version_strings(a, b):
 
 def get_ytdlp_versions():
     current_path = get_ytdlp_path()
-    current = run_ytdlp_version(current_path)
-    bundled = run_ytdlp_version(get_bundled_ytdlp_path()) if get_bundled_ytdlp_path() else None
-    updated = run_ytdlp_version(get_updatable_ytdlp_path()) if get_updatable_ytdlp_path() else None
+    current = cached_ytdlp_version(current_path)
+    bundled_path = get_bundled_ytdlp_path()
+    updated_path = get_updatable_ytdlp_path()
+    bundled = cached_ytdlp_version(bundled_path)
+    updated = cached_ytdlp_version(updated_path)
     latest = get_latest_ytdlp_release()
     latest_version = latest.get("version", "")
     return {
@@ -1236,7 +1327,7 @@ def get_ytdlp_versions():
         "latest": latest_version,
         "bundled": bundled,
         "updated": updated,
-        "using_updated": bool(get_updatable_ytdlp_path()),
+        "using_updated": bool(updated_path and current_path == updated_path),
         "update_available": bool(current and latest_version and compare_version_strings(latest_version, current) > 0),
         "release_url": latest.get("url", ""),
         "published_at": latest.get("published_at", ""),
@@ -1312,23 +1403,31 @@ def process_download_queue():
                 continue
             active_downloads.add(job_id)
             job["status"] = "starting"
-            persist_job(job_id, force=True)
-            thread = threading.Thread(
-                target=run_download,
-                args=(
-                    job_id,
-                    job["url"],
-                    job["format"],
-                    job.get("format_id"),
-                    job.get("title", ""),
-                    job.get("video_range_mode", "auto"),
-                    job.get("preset", "recommended"),
-                    job.get("options") or {},
-                ),
-            )
-            thread.daemon = True
-            job["thread"] = thread
-            thread.start()
+            try:
+                persist_job(job_id, force=True)
+                thread = threading.Thread(
+                    target=run_download,
+                    args=(
+                        job_id,
+                        job["url"],
+                        job["format"],
+                        job.get("format_id"),
+                        job.get("title", ""),
+                        job.get("video_range_mode", "auto"),
+                        job.get("preset", "recommended"),
+                        job.get("options") or {},
+                    ),
+                    daemon=True,
+                )
+                job["thread"] = thread
+                thread.start()
+            except Exception as exc:
+                active_downloads.discard(job_id)
+                job.update({"status": "error", "error": str(exc), "error_code": "application"})
+                try:
+                    persist_job(job_id, force=True)
+                except Exception as persistence_error:
+                    print(f"[queue] Could not save failed task: {persistence_error}", file=sys.stderr, flush=True)
 
 
 def append_download_log(lines, line):
@@ -1430,6 +1529,7 @@ def cache_has_partial_download(job_cache_dir):
 
 def run_ytdlp_download_process(job_id, job, cmd, estimator):
     diagnostic_lines = []
+    ensure_download_active(job)
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -1441,69 +1541,64 @@ def run_ytdlp_download_process(job_id, job, cmd, estimator):
         env=get_ytdlp_env(),
         start_new_session=sys.platform != "win32",
     )
-    job["proc"] = proc
-    job["paused"] = False
-
-    for line in proc.stdout:
-        line = line.strip()
-        if not line:
-            continue
-        structured = parse_structured_progress(line)
-        if structured and not job.get("paused"):
-            job["progress"] = estimator.update(structured)
-            job["status"] = "downloading"
-            persist_job(job_id)
-            continue
-
-        if POSTPROCESS_PREFIX in line:
-            if estimator.phase == "downloading":
-                job["progress"] = estimator.set_phase("postprocessing")
+    with jobs_lock:
+        job["proc"] = proc
+        job["paused"] = False
+    try:
+        if download_stopped(job):
+            terminate_process_tree(proc)
+        for line in proc.stdout:
+            with jobs_lock:
+                if download_stopped(job):
+                    continue
+                line = line.strip()
+                if not line:
+                    continue
+                structured = parse_structured_progress(line)
+                if structured and not job.get("paused"):
+                    job["progress"] = estimator.update(structured)
+                    job["status"] = "downloading"
+                elif POSTPROCESS_PREFIX in line:
+                    if estimator.phase == "downloading":
+                        job["progress"] = estimator.set_phase("postprocessing")
+                else:
+                    append_download_log(diagnostic_lines, line)
+                    if "[Merger]" in line:
+                        job["progress"] = estimator.set_phase("merging")
+                    elif "[ExtractAudio]" in line:
+                        job["progress"] = estimator.set_phase("converting_audio")
+                    elif "[ThumbnailsConvertor]" in line:
+                        job["progress"] = estimator.set_phase("converting_thumbnail")
+                    else:
+                        legacy = parse_progress(line)
+                        if legacy and not job.get("paused"):
+                            job["progress"] = estimator.update(legacy)
+                            job["status"] = "downloading"
+            if structured or POSTPROCESS_PREFIX in line:
                 persist_job(job_id)
-            continue
-
-        append_download_log(diagnostic_lines, line)
-        if "[Merger]" in line:
-            job["progress"] = estimator.set_phase("merging")
-        elif "[ExtractAudio]" in line:
-            job["progress"] = estimator.set_phase("converting_audio")
-        elif "[ThumbnailsConvertor]" in line:
-            job["progress"] = estimator.set_phase("converting_thumbnail")
-        else:
-            legacy = parse_progress(line)
-            if legacy and not job.get("paused"):
-                job["progress"] = estimator.update(legacy)
-                job["status"] = "downloading"
-
-    proc.wait()
-    job["proc"] = None
+        proc.wait()
+    finally:
+        if proc.poll() is None:
+            terminate_process_tree(proc)
+            proc.wait(timeout=3)
+        with jobs_lock:
+            if job.get("proc") is proc:
+                job["proc"] = None
     return proc.returncode, diagnostic_lines
 
 
-def run_download(
+def build_download_command(
     job_id,
+    job_cache_dir,
     url,
     format_choice,
     format_id,
-    title,
     video_range_mode="auto",
     preset="recommended",
     options=None,
 ):
-    with jobs_lock:
-        job = jobs[job_id]
     options = options or {}
-    download_dir = get_download_dir()
-    try:
-        job_cache_dir = get_job_cache_dir(job_id)
-    except Exception as exc:
-        job["status"] = "error"
-        job["error"] = f"Could not create download cache: {exc}"
-        persist_job(job_id, force=True)
-        with queue_lock:
-            active_downloads.discard(job_id)
-        process_download_queue()
-        return
-    job["cache_dir"] = job_cache_dir
+    validate_download_options(format_choice, preset, options)
     out_template = os.path.join(job_cache_dir, f"{job_id}.%(ext)s")
 
     cmd = [
@@ -1538,8 +1633,16 @@ def run_download(
     ffmpeg_dir = get_ffmpeg_dir()
     if ffmpeg_dir:
         cmd += ["--ffmpeg-location", ffmpeg_dir]
+        if format_choice == "video" and options.get("container") == "mkv" and options.get("embed_thumbnail"):
+            probe = "ffprobe.exe" if sys.platform == "win32" else "ffprobe"
+            if not os.path.isfile(os.path.join(ffmpeg_dir, probe)):
+                raise ValueError("FFprobe is required for MKV thumbnails; reinstall the complete application")
 
     # Build format-specific yt-dlp flags
+    container = options.get("container", "mp4")
+    webm = format_choice == "video" and container == "webm"
+    video_codec_filter = "[vcodec~='^(vp8|vp9|vp08|vp09|av01|av1)']" if webm else ""
+    audio_codec_filter = "[acodec~='^(opus|vorbis)']" if webm else ""
     if format_choice == "image":
         ext = ".jpg"
         cmd += ["--write-thumbnail", "--convert-thumbnails", "jpg", "--skip-download"]
@@ -1548,36 +1651,46 @@ def run_download(
         audio_quality = str(options.get("audio_quality", "192"))
         cmd += ["-x", "--audio-format", "mp3", "--audio-quality", f"{audio_quality}K"]
     elif format_id:
-        container = options.get("container", "mp4")
         ext = f".{container}"
-        cmd += ["-f", f"{format_id}+bestaudio/{format_id}", "--merge-output-format", container]
+        selector = f"{format_id}+bestaudio/{format_id}"
+        if webm:
+            video = f"{format_id}{video_codec_filter}"
+            selector = f"{video}[acodec=none]+bestaudio{audio_codec_filter}/{video}{audio_codec_filter}"
+        cmd += ["-f", selector, "--merge-output-format", container]
     else:
-        container = options.get("container", "mp4")
         ext = f".{container}"
         range_filter = {
             "hdr": "[dynamic_range!=SDR]",
             "sdr": "[dynamic_range=SDR]",
         }.get(video_range_mode, "")
-        video_filter = f"bestvideo{range_filter}"
-        fallback = "/best" if video_range_mode == "auto" else ""
+        video_filter = f"bestvideo{range_filter}{video_codec_filter}"
+        audio_filter = f"bestaudio{audio_codec_filter}"
+        combined_filter = f"best{video_codec_filter}{audio_codec_filter}"
+        fallback = f"/{combined_filter}" if video_range_mode == "auto" else ""
         if preset == "highest":
-            selector = f"{video_filter}+bestaudio{fallback}"
+            selector = f"{video_filter}+{audio_filter}{fallback}"
         elif preset == "smallest":
-            selector = f"worstvideo{range_filter}+worstaudio" + ("/worst" if video_range_mode == "auto" else "")
+            selector = f"worstvideo{range_filter}{video_codec_filter}+worstaudio{audio_codec_filter}"
+            if video_range_mode == "auto":
+                selector += f"/worst{video_codec_filter}{audio_codec_filter}"
         elif preset == "compatible":
             selector = f"bestvideo{range_filter}[vcodec^=avc1][height<=1080]+bestaudio[acodec^=mp4a]"
             if video_range_mode == "auto":
                 selector += "/best[ext=mp4][height<=1080]/best"
         else:
-            selector = f"{video_filter}[height<=1080]+bestaudio"
+            selector = f"{video_filter}[height<=1080]+{audio_filter}"
             if video_range_mode == "auto":
-                selector += "/best[height<=1080]/best"
+                selector += f"/{combined_filter}[height<=1080]/{combined_filter}"
         cmd += ["-f", selector, "--merge-output-format", container]
 
+    if format_choice == "video":
+        cmd += ["--remux-video", container]
     if format_choice != "image":
         if options.get("subtitles") and format_choice == "video":
             languages = options.get("subtitle_languages", "zh.*,en.*")
             cmd += ["--write-subs", "--sub-langs", languages, "--embed-subs"]
+            if webm:
+                cmd += ["--convert-subs", "vtt"]
         if options.get("metadata"):
             cmd.append("--embed-metadata")
         if options.get("chapters") and format_choice == "video":
@@ -1586,8 +1699,36 @@ def run_download(
             cmd.append("--embed-thumbnail")
 
     cmd.append(url)
+    return cmd, ext, proxy
 
+
+def run_download(
+    job_id,
+    url,
+    format_choice,
+    format_id,
+    title,
+    video_range_mode="auto",
+    preset="recommended",
+    options=None,
+):
+    with jobs_lock:
+        job = jobs.get(job_id)
+    job_cache_dir = None
     try:
+        if job is None:
+            return
+        ensure_download_active(job)
+        get_download_stop_event(job)
+        try:
+            download_dir = get_download_dir()
+        except OSError as exc:
+            raise RuntimeError(f"Download directory is unavailable: {exc}") from exc
+        job_cache_dir = get_job_cache_dir(job_id)
+        job["cache_dir"] = job_cache_dir
+        cmd, ext, proxy = build_download_command(
+            job_id, job_cache_dir, url, format_choice, format_id, video_range_mode, preset, options
+        )
         print(f"[download] Starting download (format={format_choice})", file=sys.stderr, flush=True)
         estimator = DownloadProgressEstimator()
         job["estimator"] = estimator
@@ -1598,10 +1739,12 @@ def run_download(
         returncode = 1
         attempt_cmd = list(cmd)
         for attempt in range(1, DOWNLOAD_PROCESS_ATTEMPTS + 1):
+            ensure_download_active(job)
             job["attempts"] = attempt
             returncode, diagnostic_lines = run_ytdlp_download_process(
                 job_id, job, attempt_cmd, estimator
             )
+            ensure_download_active(job)
             if returncode == 0:
                 failure = None
                 break
@@ -1611,9 +1754,11 @@ def run_download(
             if failure["code"] == "http_403" and not proxy and "--force-ipv4" not in attempt_cmd:
                 attempt_cmd = attempt_cmd[:-1] + ["--force-ipv4", attempt_cmd[-1]]
             delay = 15 if failure["code"] == "rate_limited" else 3
-            job["status"] = "starting"
-            job["error_code"] = failure["code"]
-            job["error_detail"] = failure["detail"]
+            with jobs_lock:
+                ensure_download_active(job)
+                job["status"] = "starting"
+                job["error_code"] = failure["code"]
+                job["error_detail"] = failure["detail"]
             persist_job(job_id, force=True)
             print(
                 f"[download] Retrying whole download after {failure['code']} "
@@ -1621,83 +1766,73 @@ def run_download(
                 file=sys.stderr,
                 flush=True,
             )
-            if shutdown_event.wait(delay):
+            if wait_for_download_retry(job, delay):
                 return
 
-        if shutdown_event.is_set() and job.get("status") == "interrupted":
-            return
-
-        # Don't overwrite cancelled status — user manually cancelled via UI
-        if job.get("status") == "cancelled":
-            return
+        ensure_download_active(job)
 
         if returncode != 0:
-            job["status"] = "error"
-            failure = failure or classify_download_failure([], returncode)
-            job["error"] = failure["message"]
-            job["error_code"] = failure["code"]
-            job["error_detail"] = failure["detail"]
-            job["resumable"] = bool(
-                failure["retryable"]
-                and format_choice != "image"
-                and cache_has_partial_download(job_cache_dir)
-            )
-            job["completed_at"] = time.time()
+            with jobs_lock:
+                ensure_download_active(job)
+                job["status"] = "error"
+                failure = failure or classify_download_failure([], returncode)
+                job["error"] = failure["message"]
+                job["error_code"] = failure["code"]
+                job["error_detail"] = failure["detail"]
+                job["resumable"] = bool(
+                    failure["retryable"]
+                    and format_choice != "image"
+                    and cache_has_partial_download(job_cache_dir)
+                )
+                job["completed_at"] = time.time()
             print(f"[download] Failed (code {returncode}): {job['error']}", file=sys.stderr, flush=True)
-            persist_job(job_id, force=True)
             return
 
         # Find downloaded file(s) — yt-dlp may produce extra files (.part, .ytdl, etc.)
         pattern = os.path.join(job_cache_dir, f"{job_id}.*")
         files = glob.glob(pattern)
         if not files:
-            job["status"] = "error"
-            job["error"] = "Download completed but no file was found"
-            return
+            raise RuntimeError("Download completed but no file was found")
 
         # Pick the actual output file by extension
         chosen = next((f for f in files if f.lower().endswith(ext)), None)
         if not chosen:
-            job["status"] = "error"
-            job["error"] = f"Download completed without the expected {ext} file"
-            return
+            raise RuntimeError(f"Download completed without the expected {ext} file")
 
         # Publish only the fully completed media file. Partials and intermediate
         # streams remain isolated in the task cache and are removed in finally.
-        chosen, friendly_name = finalize_cached_file(
-            chosen, download_dir, title, ext, job_id
+        finalize_cached_file(
+            chosen, download_dir, title, ext, job_id, job=job
         )
 
-        job["status"] = "done"
-        job["error_code"] = None
-        job["error_detail"] = None
-        job["resumable"] = False
-        job["file"] = chosen
-        job["filename"] = friendly_name
-        job["progress"]["percent"] = 100.0
-        job["progress"]["eta"] = None
-        job["progress"]["eta_seconds"] = None
-        job["progress"]["phase"] = "complete"
-        job["progress"]["state"] = "complete"
-        job["completed_at"] = time.time()
-        persist_job(job_id, force=True)
-
+    except DownloadStopped:
+        pass
     except Exception as e:
-        if job.get("status") != "cancelled":
-            job["status"] = "error"
-            job["error"] = str(e)
-            job["error_code"] = "application"
-            job["resumable"] = False
-            persist_job(job_id, force=True)
+        with jobs_lock:
+            if job is not None and not download_stopped(job) and job.get("status") != "done":
+                job.update({
+                    "status": "error", "error": str(e), "error_code": "application",
+                    "resumable": False, "completed_at": time.time(),
+                })
     finally:
-        if job.get("status") in ("done", "error", "cancelled", "missing"):
-            persist_job(job_id, force=True)
-        if job.get("status") != "interrupted" and not job.get("resumable"):
-            cleanup_job_cache(job_cache_dir)
-        with queue_lock:
-            active_downloads.discard(job_id)
-        if not shutdown_event.is_set():
-            process_download_queue()
+        try:
+            if job is not None:
+                with jobs_lock:
+                    if shutdown_event.is_set() and job.get("status") in ACTIVE_STATUSES:
+                        job["status"] = "interrupted"
+                        job["error"] = None
+                    preserve_cache = job.get("status") == "interrupted" or job.get("resumable")
+                try:
+                    persist_job(job_id, force=True)
+                except Exception as exc:
+                    print(f"[download] Could not save task state: {exc}", file=sys.stderr, flush=True)
+                if job_cache_dir and not preserve_cache:
+                    cleanup_job_cache(job_cache_dir)
+        finally:
+            with queue_lock:
+                active_downloads.discard(job_id)
+            if not shutdown_event.is_set():
+                process_download_queue()
 
 
 @app.route("/")
@@ -1752,6 +1887,15 @@ VALID_FORMAT_CHOICES = {"video", "audio", "image"}
 VALID_PRESETS = {"recommended", "highest", "smallest", "compatible", "custom"}
 VALID_CONTAINERS = {"mp4", "mkv", "webm"}
 VALID_AUDIO_QUALITIES = {"128", "192", "256", "320"}
+
+
+def validate_download_options(format_choice, preset, options):
+    if format_choice != "video" or options.get("container") != "webm":
+        return
+    if options.get("embed_thumbnail"):
+        raise ValueError("WebM does not support embedded thumbnails; choose MP4 or MKV")
+    if preset == "compatible":
+        raise ValueError("Compatibility mode requires MP4 or MKV, not WebM")
 
 
 def normalize_download_options(value):
@@ -1874,6 +2018,7 @@ def get_info():
             "hdr": f["_is_hdr"],
             "dynamic_range": f["_range_label"],
             "vcodec": f.get("vcodec", ""),
+            "acodec": f.get("acodec", ""),
             "ext": f.get("ext", ""),
             "fps": f.get("fps"),
             "filesize": f.get("filesize") or f.get("filesize_approx"),
@@ -1918,6 +2063,10 @@ def start_download():
         return jsonify({"error": "Invalid download preset"}), 400
     if format_id:
         preset = "custom"
+    try:
+        validate_download_options(format_choice, preset, options)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     cleanup_old_jobs()
     # Generate a readable-enough job ID from URL hash + timestamp
@@ -1982,54 +2131,49 @@ def download_file(job_id):
 
 @app.route("/api/pause/<job_id>", methods=["POST"])
 def pause_download(job_id):
-    with jobs_lock:
-        job = jobs.get(job_id)
-    if not job or not job.get("proc"):
-        return jsonify({"error": "Job not found"}), 404
-    proc = job["proc"]
-    if proc.poll() is not None:
-        return jsonify({"error": "Process already finished"}), 400
     try:
-        if job.get("paused"):
-            _resume_process(proc)
-            job["paused"] = False
-            job["status"] = "downloading"
+        with jobs_lock:
+            job = jobs.get(job_id)
+            if not job or not job.get("proc"):
+                return jsonify({"error": "Job not found"}), 404
+            if download_stopped(job) or job.get("status") not in ACTIVE_STATUSES:
+                return jsonify({"error": "Task has already finished"}), 409
+            proc = job["proc"]
+            if proc.poll() is not None:
+                return jsonify({"error": "Process already finished"}), 400
+            paused = not job.get("paused")
+            (_suspend_process if paused else _resume_process)(proc)
+            job["paused"] = paused
+            job["status"] = "paused" if paused else "downloading"
             estimator = job.get("estimator")
             if estimator:
-                job["progress"] = estimator.resume()
-            persist_job(job_id, force=True)
-            return jsonify({"status": "resumed"})
-        else:
-            _suspend_process(proc)
-            job["paused"] = True
-            job["status"] = "paused"
-            estimator = job.get("estimator")
-            if estimator:
-                job["progress"] = estimator.pause()
-            persist_job(job_id, force=True)
-            return jsonify({"status": "paused"})
+                job["progress"] = estimator.pause() if paused else estimator.resume()
+        persist_job(job_id, force=True)
+        return jsonify({"status": "paused" if paused else "resumed"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/cancel/<job_id>", methods=["POST"])
 def cancel_download(job_id):
-    with jobs_lock:
+    with queue_lock, jobs_lock:
         job = jobs.get(job_id)
-    if not job:
-        return jsonify({"error": "Job not found"}), 404
-    proc = job.get("proc")
-    if proc and proc.poll() is None:
-        terminate_process_tree(proc)
-    start_next = False
-    with queue_lock:
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+        if job.get("status") == "cancelled":
+            return jsonify({"status": "cancelled"})
+        if job.get("status") not in ACTIVE_STATUSES:
+            return jsonify({"error": "Task has already finished"}), 409
+        get_download_stop_event(job).set()
+        job["status"] = "cancelled"
+        job["resumable"] = False
+        job["completed_at"] = time.time()
+        proc = job.get("proc")
         if job_id in download_queue:
             download_queue.remove(job_id)
-            start_next = True
-        elif job_id not in active_downloads:
-            start_next = True
-    job["status"] = "cancelled"
-    job["completed_at"] = time.time()
+        start_next = job_id not in active_downloads
+    if proc and proc.poll() is None:
+        terminate_process_tree(proc)
     persist_job(job_id, force=True)
     # Active tasks keep their concurrency slot until the worker observes the
     # terminated process and runs its cache cleanup in finally.
@@ -2068,7 +2212,9 @@ def list_jobs():
 
 @app.route("/api/jobs/<job_id>/retry", methods=["POST"])
 def retry_job(job_id):
-    with jobs_lock:
+    with queue_lock, jobs_lock:
+        if job_id in active_downloads:
+            return jsonify({"error": "Task is still finishing; retry shortly"}), 409
         source = jobs.get(job_id)
         if not source or source.get("status") not in ("done", "error", "cancelled", "missing"):
             return jsonify({"error": "Task cannot be retried"}), 400
@@ -2085,6 +2231,7 @@ def retry_job(job_id):
             source["attempts"] = 0
             source.pop("proc", None)
             source.pop("estimator", None)
+            source.pop("_stop_event", None)
             new_id = job_id
         else:
             new_id = f"retry_{time.time_ns()}_{uuid.uuid4().hex[:8]}"
@@ -2111,17 +2258,18 @@ def retry_job(job_id):
 
 @app.route("/api/jobs/<job_id>", methods=["DELETE"])
 def delete_job(job_id):
-    with jobs_lock:
+    with queue_lock, jobs_lock:
         job = jobs.get(job_id)
         if not job:
             return jsonify({"error": "Job not found"}), 404
-        if job.get("status") not in ("done", "error", "cancelled", "missing"):
+        if job_id in active_downloads or job.get("status") not in ("done", "error", "cancelled", "missing"):
             return jsonify({"error": "Active tasks cannot be removed"}), 400
         cache_dir = job.get("cache_dir")
         jobs.pop(job_id, None)
     if cache_dir:
         cleanup_job_cache(cache_dir)
-    get_job_store().delete(job_id)
+    with persistence_lock:
+        get_job_store().delete(job_id)
     return jsonify({"status": "deleted"})
 
 
@@ -2226,6 +2374,42 @@ def _redacted_proxy(proxy):
         return "configured (invalid URL)"
 
 
+def redact_diagnostic_text(value):
+    if value is None:
+        return None
+    text = str(value)[:DOWNLOAD_LOG_CHAR_LIMIT]
+
+    def redact_url(match):
+        try:
+            parsed = urllib.parse.urlsplit(match.group(0))
+            host = parsed.hostname or "redacted"
+            if ":" in host:
+                host = f"[{host}]"
+            port = f":{parsed.port}" if parsed.port else ""
+            return urllib.parse.urlunsplit((parsed.scheme, host + port, "/[redacted]", "", ""))
+        except ValueError:
+            return "[redacted-url]"
+
+    text = re.sub(r"(?i)\b(?:https?|socks4|socks5h?)://[^\s<>\"']+", redact_url, text)
+    text = re.sub(
+        r"(?im)\b(authorization|proxy-authorization|cookie|set-cookie)[\"']?\s*[:=]\s*[^\r\n]+",
+        lambda match: match.group(1) + ": [redacted]", text,
+    )
+    text = re.sub(
+        r"(?i)\b((?:access|refresh|id)[_-]?token|token|sig(?:nature)?|password|passwd|api[_-]?key|secret|session(?:id)?)"
+        r"[\"']?\s*[:=]\s*(?:[\"'][^\"'\r\n]*[\"']|[^\s,;]+)",
+        lambda match: match.group(1) + "=[redacted]", text,
+    )
+    text = re.sub(r'''(["'])(?:[a-zA-Z]:[\\/]|\\\\|/)[^"'\r\n]*\1''', '"[redacted-path]"', text)
+    text = re.sub(r"(?<!\w)(?:[a-zA-Z]:[\\/]|\\\\)[^\r\n<>\"']+", "[redacted-path]", text)
+    text = re.sub(
+        r"(?<![\w:/])/(?:Users|home|private|tmp|var|Volumes|mnt|media|Applications|opt|usr)/[^\r\n<>\"']+",
+        "[redacted-path]", text,
+    )
+    text = re.sub(r"(?<![\w:/])/(?!\[redacted\])[^\s<>\"']+", "[redacted-path]", text)
+    return re.sub(r"\b[\w.%+-]+@[\w.-]+\.[a-zA-Z]{2,}\b", "[redacted-email]", text)
+
+
 @app.route("/api/diagnostics")
 def diagnostics():
     cfg = load_config()
@@ -2248,7 +2432,7 @@ def diagnostics():
             "-version",
         ]),
         "settings": {
-            "download_dir": cfg.get("download_dir"),
+            "download_dir_configured": bool(cfg.get("download_dir")),
             "proxy": _redacted_proxy(proxy),
             "cookies_browser": cfg.get("cookies_browser", ""),
             "cookies_file_configured": bool(cfg.get("cookies_file")),
@@ -2260,9 +2444,9 @@ def diagnostics():
                 "status": job.get("status"),
                 "format": job.get("format"),
                 "preset": job.get("preset"),
-                "error": job.get("error"),
+                "error": redact_diagnostic_text(job.get("error")),
                 "error_code": job.get("error_code"),
-                "error_detail": job.get("error_detail"),
+                "error_detail": redact_diagnostic_text(job.get("error_detail")),
                 "resumable": bool(job.get("resumable")),
                 "attempts": job.get("attempts", 0),
                 "created_at": job.get("created_at"),
@@ -2346,7 +2530,8 @@ def config():
 def signal_handler(sig, frame):
     """Handle termination signals."""
     print(f"[signal] Received signal {sig}, cleaning up...", file=sys.stderr, flush=True)
-    cleanup_all_jobs()
+    # Unwind any interrupted queue/journal locks before the server finalizer
+    # stops workers and persists their resumable state.
     sys.exit(0)
 
 
@@ -2354,9 +2539,25 @@ signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 
 
-if __name__ == "__main__":
+def initialize_download_state():
     restore_jobs()
-    cleanup_destination_temp_files(get_download_dir())
+    try:
+        cleanup_destination_temp_files(get_download_dir())
+    except OSError as exc:
+        # Keep the settings UI available so the user can repair an offline path.
+        print(f"[startup] Download directory is unavailable: {exc}", file=sys.stderr, flush=True)
+
+
+def run_server():
+    with DataDirectoryLock(get_base_dir()):
+        try:
+            initialize_download_state()
+            serve_application()
+        finally:
+            cleanup_all_jobs()
+
+
+def serve_application():
 
     # First-run: import proxy from Electron's detectProxy() if config is empty.
     # This way users don't need to manually configure their proxy on first launch.
@@ -2372,10 +2573,17 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8899))
     host = os.environ.get("HOST", "127.0.0.1")
     server = make_server(host, port, app, threaded=True)
-    process_download_queue()
-    print(
-        f"[startup] MEDIADROP_READY {host}:{server.server_port}",
-        file=sys.stderr,
-        flush=True,
-    )
-    server.serve_forever()
+    try:
+        process_download_queue()
+        print(
+            f"[startup] MEDIADROP_READY {host}:{server.server_port}",
+            file=sys.stderr,
+            flush=True,
+        )
+        server.serve_forever()
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    run_server()

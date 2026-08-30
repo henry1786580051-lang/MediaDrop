@@ -1,6 +1,21 @@
 const { spawnSync } = require("child_process");
 const path = require("path");
 
+function ensureSingleInstance(app, getWindow) {
+  if (!app.requestSingleInstanceLock()) {
+    app.quit();
+    return false;
+  }
+  app.on("second-instance", () => {
+    const window = getWindow();
+    if (!window || window.isDestroyed()) return;
+    if (window.isMinimized()) window.restore();
+    window.show();
+    window.focus();
+  });
+  return true;
+}
+
 function appendBoundedText(current, chunk, maxLength = 128 * 1024) {
   const limit = Math.max(0, Number(maxLength) || 0);
   if (limit === 0) return "";
@@ -140,6 +155,7 @@ function stopProcessTree(child) {
 module.exports = {
   appendBoundedText,
   compareVersions,
+  ensureSingleInstance,
   getDevelopmentPythonCandidates,
   isSafeExternalUrl,
   isSupportedProxyUrl,

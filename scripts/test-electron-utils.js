@@ -1,6 +1,7 @@
 const {
   appendBoundedText,
   compareVersions,
+  ensureSingleInstance,
   getDevelopmentPythonCandidates,
   isSafeExternalUrl,
   isSupportedProxyUrl,
@@ -12,7 +13,7 @@ const {
 } = require("../electron-utils");
 const { adHocSignApp } = require("./adhoc-sign");
 const { verifyMacAppSignature } = require("./verify-bundle");
-const { detectExecutableArchitecture } = require("./verify-ffmpeg");
+const { detectExecutableArchitecture, hasEncoder } = require("./verify-ffmpeg");
 const fs = require("fs");
 const path = require("path");
 
@@ -44,6 +45,9 @@ assert(appendBoundedText("abc", "def", 0) === "", "Disabled server log buffer re
 assert(parseServerReadyPort("[startup] MEDIADROP_READY 127.0.0.1:49152") === 49152, "Server ready port was not parsed");
 assert(parseServerReadyPort("[startup] MEDIADROP_READY 0.0.0.0:49152") === null, "Non-loopback server marker was accepted");
 assert(parseServerReadyPort("[startup] MEDIADROP_READY 127.0.0.1:70000") === null, "Invalid server port was accepted");
+assert(hasEncoder(" V....D png  PNG image", "png"), "PNG encoder was not detected");
+assert(hasEncoder(" A....D libmp3lame  MP3", "libmp3lame"), "MP3 encoder was not detected");
+assert(!hasEncoder(" V....D apng  Animated PNG", "png"), "APNG was mistaken for the PNG encoder");
 
 const assets = [
   { name: "MediaDrop-1.1.0-arm64.dmg", browser_download_url: "https://example.com/mac" },
@@ -56,6 +60,25 @@ assert(selectReleaseAsset(assets, "win32", "x64")?.name === "MediaDrop.Setup.1.1
 assert(isTrustedMediaDropReleaseUrl("https://github.com/henry1786580051-lang/MediaDrop/releases/download/V1.1.0/file.exe"), "Official release URL was rejected");
 assert(!isTrustedMediaDropReleaseUrl("https://github.com/other/repo/releases/download/V1/file.exe"), "Foreign release URL was trusted");
 stopProcessTree(null);
+
+let secondaryQuit = false;
+assert(!ensureSingleInstance({
+  requestSingleInstanceLock: () => false,
+  quit: () => { secondaryQuit = true; },
+}, () => null), "Secondary instance was allowed to start");
+assert(secondaryQuit, "Secondary instance was not closed");
+let secondInstance;
+const focusActions = [];
+assert(ensureSingleInstance({
+  requestSingleInstanceLock: () => true,
+  on: (event, callback) => { if (event === "second-instance") secondInstance = callback; },
+}, () => ({
+  isDestroyed: () => false, isMinimized: () => true,
+  restore: () => focusActions.push("restore"), show: () => focusActions.push("show"),
+  focus: () => focusActions.push("focus"),
+})), "Primary instance was rejected");
+secondInstance();
+assert(focusActions.join(",") === "restore,show,focus", "Existing window was not restored and focused");
 
 const packageConfig = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"));
 assert(packageConfig.engines.node === ">=22.12.0", "Node runtime requirement is not pinned");
@@ -71,6 +94,7 @@ const flaskSource = fs.readFileSync(path.join(__dirname, "..", "app", "app.py"),
 assert(!flaskSource.includes("'unsafe-inline'"), "Content security policy still allows inline code");
 assert(flaskSource.includes("script-src 'self';") && flaskSource.includes("style-src 'self';"), "Strict local script and style policy is missing");
 const mainSource = fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8");
+assert(mainSource.includes("if (!isPrimaryInstance) return;"), "Secondary instance can still start a backend");
 assert(mainSource.includes("MEDIADROP_JS_RUNTIME: process.execPath"), "Electron is not exposed as yt-dlp's JavaScript runtime");
 assert(flaskSource.includes('"ELECTRON_RUN_AS_NODE"'), "yt-dlp JavaScript runtime mode is not enabled");
 assert(flaskSource.includes('"--js-runtimes"'), "yt-dlp commands do not receive the JavaScript runtime");
@@ -81,6 +105,7 @@ assert(buildWorkflow.includes("node-version: 22"), "Release workflow does not us
 assert(buildWorkflow.includes("pip install -r app/requirements-build.txt"), "Release workflow does not use pinned Python build dependencies");
 assert(!buildWorkflow.includes("pip install flask pyinstaller"), "Release workflow still installs moving Python build dependencies");
 assert(buildWorkflow.includes("FFMPEG_VERSION: '8.1.2'"), "Release workflow FFmpeg version is not pinned");
+assert(buildWorkflow.includes("YTDLP_VERSION: '2026.08.19'"), "Release workflow yt-dlp version is not pinned");
 assert(!buildWorkflow.includes("ffmpeg-master-latest"), "Release workflow still uses a moving FFmpeg master build");
 assert(buildWorkflow.includes("FFMPEG_WINDOWS_RELEASE: 'autobuild-2026-08-17-13-05'"), "Windows FFmpeg release is not immutable");
 assert(!buildWorkflow.includes("releases/download/latest/${ASSET}"), "Windows FFmpeg download still uses a moving release");
@@ -95,6 +120,11 @@ assert(macFfmpegBuild.includes("https://codeload.github.com/FFmpeg/FFmpeg/"), "O
 assert(macFfmpegBuild.includes("9fd092511605bbebafe095ea6d38d9e40f34d12f7386e1258372df8be0576eb7"), "Official FFmpeg source checksum is missing");
 assert(macFfmpegBuild.includes("ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e"), "LAME source checksum is missing");
 assert(macFfmpegBuild.includes("--enable-libmp3lame"), "macOS FFmpeg build does not enable MP3 encoding");
+assert(macFfmpegBuild.includes("--enable-zlib"), "macOS FFmpeg build does not enable PNG encoding support");
+assert(macFfmpegBuild.includes("macos-arm64-v3"), "macOS FFmpeg cache was not invalidated after adding FFprobe");
+assert(macFfmpegBuild.includes("--enable-ffprobe") && !macFfmpegBuild.includes("--disable-ffprobe"), "macOS build does not include FFprobe");
+assert(macFfmpegBuild.includes('cp ffprobe "$BINARY_CACHE/ffprobe"'), "FFprobe is missing from the macOS binary cache");
+assert(buildWorkflow.includes("cp bundled-ffmpeg/*/bin/ffprobe.exe bundled-bin/ffprobe.exe"), "Windows build does not include FFprobe");
 assert(buildWorkflow.includes("verify-ffmpeg.js bundled-bin/ffmpeg.exe"), "Windows FFmpeg architecture verification is missing");
 assert(buildWorkflow.includes("npm run verify:mac"), "macOS release artifacts are not verified before upload");
 
@@ -129,11 +159,13 @@ assert(localMacBuild.includes("requirements-build.txt") && localMacBuild.include
 assert(localMacBuild.includes("verify-bundle.js") && localMacBuild.includes("hdiutil verify"), "Local macOS artifacts are not fully verified");
 const localBinaryBuild = fs.readFileSync(path.join(__dirname, "build-bin.sh"), "utf8");
 assert(localBinaryBuild.includes('PYTHON_BIN="${PYTHON_BIN:-python3}"'), "Local binary build cannot use the pinned build environment");
+assert(localBinaryBuild.includes("SHA2-256SUMS") && localBinaryBuild.includes("shasum -a 256 -c -"), "Local yt-dlp download is not checksum verified");
+assert(localBinaryBuild.includes('"$actual_ytdlp_version" != "$YTDLP_VERSION"'), "Local yt-dlp version is not verified");
 
 const runtimeRequirements = fs.readFileSync(path.join(__dirname, "..", "app", "requirements.txt"), "utf8");
 const buildRequirements = fs.readFileSync(path.join(__dirname, "..", "app", "requirements-build.txt"), "utf8");
 assert(runtimeRequirements.includes("Flask==3.1.3"), "Flask runtime version is not pinned");
-assert(runtimeRequirements.includes("yt-dlp==2026.7.4"), "yt-dlp runtime version is not pinned");
+assert(runtimeRequirements.includes("yt-dlp==2026.8.19"), "yt-dlp runtime version is not pinned");
 assert(buildRequirements.includes("PyInstaller==6.21.0"), "PyInstaller build version is not pinned");
 
 const fakePe = Buffer.alloc(256);

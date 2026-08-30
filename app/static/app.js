@@ -398,7 +398,7 @@ function buildDownloadRequest(card, format = card.format || 'video') {
       subtitle_languages: options.subtitle_languages || 'zh.*,en.*',
       metadata: Boolean(options.metadata),
       chapters: Boolean(options.chapters),
-      embed_thumbnail: Boolean(options.embed_thumbnail),
+      embed_thumbnail: options.container !== 'webm' && Boolean(options.embed_thumbnail),
     };
   } else if (format === 'audio') {
     requestOptions = {
@@ -463,6 +463,11 @@ function safeMediaUrl(value) {
 
 function friendlyError(err) {
   err = String(err || '未知错误');
+  if (err.includes('WebM does not support embedded thumbnails')) return 'WebM 不支持嵌入封面，请选择 MP4 或 MKV';
+  if (err.includes('Compatibility mode requires')) return '兼容模式需要使用 MP4 或 MKV';
+  if (err.includes('FFprobe is required')) return '缺少 FFprobe 组件，请重新安装完整应用';
+  if (err.includes('Task has already finished')) return '任务已经完成，正在刷新状态';
+  if (err.includes('Task is still finishing')) return '任务正在完成清理，请稍后重试';
   if (err.includes('Unsupported URL')) return '暂不支持此链接';
   if (err.includes('Video unavailable') || err.includes('not available')) return '视频不可用或属于私密内容';
   if (err.includes('Private video')) return '这是一个私密视频';
@@ -508,6 +513,23 @@ document.getElementById('urls').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); go(); }
 });
 
+function stopCardPolling(card) {
+  if (card._pollInterval != null) clearTimeout(card._pollInterval);
+  card._pollInterval = null;
+  card._pollController?.abort();
+  card._pollController = null;
+  card._pollGeneration = (card._pollGeneration || 0) + 1;
+}
+
+function isCurrentCardAttempt(idx, card, attempt) {
+  return cardData[idx] === card && card._downloadAttempt === attempt;
+}
+
+function isWebmFormat(format) {
+  return /^(vp8|vp9|vp08|vp09|av01|av1)/i.test(format.vcodec || '')
+    && (!format.acodec || format.acodec === 'none' || /^(opus|vorbis)/i.test(format.acodec));
+}
+
 async function go() {
   if (parseController) {
     parseController.abort();
@@ -520,6 +542,7 @@ async function go() {
   const container = document.getElementById('cards');
   parseController = new AbortController();
   btn.textContent = '取消解析';
+  cardData.forEach(stopCardPolling);
   container.innerHTML = '';
   cardData = [];
 
@@ -579,7 +602,9 @@ async function go() {
 
 function renderCard(idx) {
   const c = cardData[idx];
+  if (!c) return;
   let el = document.getElementById(`card-${idx}`);
+  const advancedOpen = Boolean(el?.querySelector('.advanced-options')?.open);
   if (!el) {
     el = document.createElement('div');
     el.id = `card-${idx}`;
@@ -650,21 +675,20 @@ function renderCard(idx) {
   </div>`;
 
   const preset = c.preset || 'recommended';
+  const webm = c.options?.container === 'webm';
   const presets = [
     ['recommended', '推荐'], ['highest', '最高画质'], ['smallest', '节省空间'], ['compatible', '兼容模式']
   ];
   const presetPills = `<div class="preset-row">${presets.map(([value, label]) =>
-    `<button class="q-chip${preset === value && !c.selectedFormatId ? ' active' : ''}" data-click-action="set-preset" data-index="${idx}" data-preset="${value}">${label}</button>`
+    `<button class="q-chip${preset === value && !c.selectedFormatId ? ' active' : ''}" data-click-action="set-preset" data-index="${idx}" data-preset="${value}"${webm && value === 'compatible' ? ' disabled title="兼容模式需要 MP4 或 MKV"' : ''}>${label}</button>`
   ).join('')}</div>`;
 
   // Quality chips (only for video)
   let qualityChips = '';
   if (!isAudio && !isImage && c.formats && c.formats.length > 0) {
-    const visibleFormats = rangeMode === 'hdr'
-      ? c.formats.filter(f => f.hdr)
-      : rangeMode === 'sdr'
-        ? c.formats.filter(f => !f.hdr)
-        : c.formats;
+    const visibleFormats = c.formats.filter(f =>
+      (!webm || isWebmFormat(f)) && (rangeMode === 'hdr' ? f.hdr : rangeMode === 'sdr' ? !f.hdr : true)
+    );
     qualityChips = visibleFormats.map(f => {
       const size = f.filesize ? ` · ${f.filesize_is_estimate ? '约 ' : ''}${fmtSize(f.filesize)}` : '';
       const fps = f.fps ? ` · ${Math.round(f.fps)}fps` : '';
@@ -679,7 +703,7 @@ function renderCard(idx) {
     <div class="advanced-grid">
       ${!isAudio && !isImage ? `<label class="select-field"><span>封装</span><select data-change-action="set-option" data-index="${idx}" data-option="container"><option value="mp4"${options.container === 'mp4' ? ' selected' : ''}>MP4</option><option value="mkv"${options.container === 'mkv' ? ' selected' : ''}>MKV</option><option value="webm"${options.container === 'webm' ? ' selected' : ''}>WebM</option></select></label>` : ''}
       ${isAudio ? `<label class="select-field"><span>音质</span><select data-change-action="set-option" data-index="${idx}" data-option="audio_quality"><option value="128"${options.audio_quality === '128' ? ' selected' : ''}>128 kbps</option><option value="192"${(options.audio_quality || '192') === '192' ? ' selected' : ''}>192 kbps</option><option value="256"${options.audio_quality === '256' ? ' selected' : ''}>256 kbps</option><option value="320"${options.audio_quality === '320' ? ' selected' : ''}>320 kbps</option></select></label>` : ''}
-      ${!isImage ? `<label class="check-field"><input type="checkbox" data-change-action="set-option" data-index="${idx}" data-option="metadata"${options.metadata ? ' checked' : ''}>写入元数据</label><label class="check-field"><input type="checkbox" data-change-action="set-option" data-index="${idx}" data-option="embed_thumbnail"${options.embed_thumbnail ? ' checked' : ''}>嵌入封面</label>` : ''}
+      ${!isImage ? `<label class="check-field"><input type="checkbox" data-change-action="set-option" data-index="${idx}" data-option="metadata"${options.metadata ? ' checked' : ''}>写入元数据</label><label class="check-field"${webm && !isAudio ? ' title="WebM 不支持嵌入封面"' : ''}><input type="checkbox" data-change-action="set-option" data-index="${idx}" data-option="embed_thumbnail"${webm && !isAudio ? ' disabled' : options.embed_thumbnail ? ' checked' : ''}>嵌入封面</label>` : ''}
       ${!isAudio && !isImage ? `<label class="check-field"><input type="checkbox" data-change-action="set-option" data-index="${idx}" data-option="subtitles"${options.subtitles ? ' checked' : ''}>嵌入字幕</label><label class="check-field"><input type="checkbox" data-change-action="set-option" data-index="${idx}" data-option="chapters"${options.chapters ? ' checked' : ''}>保留章节</label><label class="text-field"><span>字幕语言</span><input type="text" value="${attr(options.subtitle_languages || 'zh.*,en.*')}" data-change-action="set-option" data-index="${idx}" data-option="subtitle_languages"></label>` : ''}
     </div>
   </details>`;
@@ -700,7 +724,7 @@ function renderCard(idx) {
         <span class="card-status downloading">等待下载</span>
         <button class="card-dl-btn small cancel" data-click-action="cancel-card" data-index="${idx}">取消</button>
       </div>`;
-  } else if (c.status === 'downloading' || c.status === 'paused') {
+  } else if (c.status === 'downloading' || c.status === 'paused' || c.status === 'cancelling') {
     const p = c.progress || {};
     const numericPct = Number.isFinite(p.percent) ? Math.max(0, Math.min(100, p.percent)) : null;
     const pct = numericPct != null ? numericPct.toFixed(1) : '--';
@@ -708,12 +732,13 @@ function renderCard(idx) {
     const downloaded = fmtSize(p.downloaded || 0);
     const total = p.total ? fmtSize(p.total) : '';
     const isPaused = c.status === 'paused';
+    const isCancelling = c.status === 'cancelling';
     const statusIcon = isPaused ? '⏸' : '<span class="spin"></span>';
     const phaseLabel = progressPhaseLabel(p.phase);
     const etaText = fmtEtaEstimate(p, isPaused);
     const progressDetail = phaseLabel ? etaText : [speed, etaText].filter(Boolean).join(' · ');
     const totalText = p.total_is_estimate ? `约 ${total}` : total;
-    const statusText = isPaused
+    const statusText = isCancelling ? '正在取消' : isPaused
       ? '已暂停'
       : phaseLabel || (total ? `${downloaded} / ${totalText}` : downloaded !== '0 B' ? `已下载 ${downloaded}` : '正在下载');
     progressHtml = `
@@ -723,8 +748,8 @@ function renderCard(idx) {
       </div>
       <div class="dl-controls">
         <span class="card-status downloading">${statusIcon} ${statusText}</span>
-        <button class="card-dl-btn small" data-click-action="toggle-pause" data-index="${idx}">${isPaused ? '继续' : '暂停'}</button>
-        <button class="card-dl-btn small cancel" data-click-action="cancel-card" data-index="${idx}">取消</button>
+        <button class="card-dl-btn small" data-click-action="toggle-pause" data-index="${idx}"${isCancelling ? ' disabled' : ''}>${isPaused ? '继续' : '暂停'}</button>
+        <button class="card-dl-btn small cancel" data-click-action="cancel-card" data-index="${idx}"${isCancelling ? ' disabled' : ''}>取消</button>
       </div>`;
   } else if (c.status === 'done') {
     const completed = completedDownloadFor(c, cardFmt);
@@ -766,48 +791,67 @@ function renderCard(idx) {
       ${c.cookieWarning ? `<div class="cookie-warning">${esc(c.cookieWarning)}</div>` : ''}
       <div class="card-actions">${actionHtml}</div>
       ${progressHtml}
+      ${c.actionError ? `<div class="card-error-msg">${esc(c.actionError)}</div>` : ''}
     </div>
   `;
+  if (advancedOpen && el.querySelector('.advanced-options')) el.querySelector('.advanced-options').open = true;
 }
 
 
 async function togglePause(idx) {
   const c = cardData[idx];
-  if (!c.jobId) return;
+  if (!c?.jobId || c.cancelRequested) return;
+  const attempt = c._downloadAttempt;
+  const jobId = c.jobId;
   try {
-    const res = await fetch(`/api/pause/${c.jobId}`, { method: 'POST' });
+    const res = await fetch(`/api/pause/${encodeURIComponent(jobId)}`, { method: 'POST' });
     const data = await res.json();
-    if (data.error) {
-      c.status = 'error';
-      c.error = data.error;
-    } else if (data.status === 'paused') {
+    if (!isCurrentCardAttempt(idx, c, attempt) || c.jobId !== jobId || c.cancelRequested) return;
+    if (!res.ok || data.error) throw new Error(data.error || '任务操作失败');
+    c.actionError = null;
+    if (data.status === 'paused') {
       c.status = 'paused';
     } else if (data.status === 'resumed') {
       c.status = 'downloading';
     }
     renderCard(idx);
   } catch (err) {
-    c.status = 'error';
-    c.error = err.message;
+    if (!isCurrentCardAttempt(idx, c, attempt) || c.jobId !== jobId || c.cancelRequested) return;
+    c.actionError = friendlyError(err.message);
     renderCard(idx);
   }
 }
 
 async function cancelDl(idx) {
   const c = cardData[idx];
-  if (!c.jobId) return;
-  // Stop poll immediately to prevent race with in-flight responses
+  if (!c || c.cancelRequested || !c._downloadAttempt) return;
+  c._downloadAttempt.cancelled = true;
   c.cancelRequested = true;
-  if (c._pollInterval) {
-    clearTimeout(c._pollInterval);
-    c._pollInterval = null;
-  }
+  c.status = 'cancelling';
+  c.actionError = null;
+  stopCardPolling(c);
+  renderCard(idx);
+  if (c.jobId) await finishCardCancellation(idx, c, c._downloadAttempt, c.jobId);
+}
+
+async function finishCardCancellation(idx, card, attempt, jobId) {
   try {
-    await fetch(`/api/cancel/${c.jobId}`, { method: 'POST' });
-    c.status = 'cancelled';
-    c.progress = {};
-    renderCard(idx);
-  } catch {}
+    const response = await fetch(`/api/cancel/${encodeURIComponent(jobId)}`, { method: 'POST' });
+    const data = await response.json();
+    if (!response.ok || data.error) throw new Error(data.error || '取消失败');
+    if (!isCurrentCardAttempt(idx, card, attempt)) return;
+    card.status = 'cancelled';
+    card.progress = {};
+    card.activeRequest = null;
+  } catch (error) {
+    if (!isCurrentCardAttempt(idx, card, attempt)) return;
+    attempt.cancelled = false;
+    card.cancelRequested = false;
+    card.status = 'downloading';
+    card.actionError = friendlyError(error.message);
+    pollCard(idx, card, jobId);
+  }
+  if (isCurrentCardAttempt(idx, card, attempt)) renderCard(idx);
 }
 
 function renderDownloadAll() {
@@ -828,13 +872,25 @@ function pickFormat(idx, formatId) {
 }
 
 function setPreset(idx, preset) {
+  if (preset === 'compatible' && cardData[idx].options?.container === 'webm') return;
   cardData[idx].preset = preset;
   cardData[idx].selectedFormatId = null;
   renderCard(idx);
 }
 
 function setOption(idx, key, value) {
-  cardData[idx].options = { ...(cardData[idx].options || {}), [key]: value };
+  const card = cardData[idx];
+  card.options = { ...(card.options || {}), [key]: value };
+  if (key === 'container' && value === 'webm') {
+    card.options.embed_thumbnail = false;
+    if (card.preset === 'compatible') card.preset = 'recommended';
+    const selected = card.formats?.find(format => format.id === card.selectedFormatId);
+    if (selected && !isWebmFormat(selected)) {
+      card.selectedFormatId = null;
+      card.preset = 'recommended';
+    }
+  }
+  renderCard(idx);
 }
 
 function setVideoRangeMode(idx, mode) {
@@ -847,14 +903,20 @@ function setVideoRangeMode(idx, mode) {
 
 async function dlCard(idx) {
   const c = cardData[idx];
+  if (!c || ['downloading', 'queued', 'paused', 'cancelling'].includes(c.status)) return;
   const requestedFormat = currentCardFormat(idx);
   const requested = buildDownloadRequest(c, requestedFormat);
   const resumeJobId = c.status === 'error' && c.resumable && c.jobId
     && c.activeRequest && downloadRequestKey(c.activeRequest) === downloadRequestKey(requested)
     ? c.jobId : null;
+  stopCardPolling(c);
+  const attempt = { cancelled: false };
+  c._downloadAttempt = attempt;
+  c.jobId = null;
   c.activeRequest = requested;
   c.status = 'downloading';
   c.error = null;
+  c.actionError = null;
   c.progress = {};
   c.cancelRequested = false;
   renderCard(idx);
@@ -865,44 +927,49 @@ async function dlCard(idx) {
       headers: resumeJobId ? undefined : { 'Content-Type': 'application/json' },
       body: resumeJobId ? undefined : JSON.stringify({
         url: c.url,
-        format: c.activeRequest.format,
-        format_id: c.activeRequest.formatId,
-        video_range_mode: c.activeRequest.videoRangeMode || 'auto',
-        preset: c.activeRequest.preset,
-        options: c.activeRequest.options,
+        format: requested.format,
+        format_id: requested.formatId,
+        video_range_mode: requested.videoRangeMode || 'auto',
+        preset: requested.preset,
+        options: requested.options,
         skip_browser_cookies: Boolean(c.skipBrowserCookies),
         title: c.title || '',
       }),
     });
     const data = await res.json();
-    if (data.error) {
-      c.status = 'error';
-      c.error = data.error;
-      renderCard(idx);
-      return;
+    if (!res.ok || data.error || !data.job_id) throw new Error(data.error || '无法创建下载任务');
+    if (isCurrentCardAttempt(idx, c, attempt)) c.jobId = data.job_id;
+    if (attempt.cancelled) {
+      await finishCardCancellation(idx, c, attempt, data.job_id);
+    } else if (isCurrentCardAttempt(idx, c, attempt)) {
+      pollCard(idx, c, data.job_id);
     }
-    c.jobId = data.job_id;
-    pollCard(idx);
   } catch (err) {
+    if (!isCurrentCardAttempt(idx, c, attempt)) return;
     c.status = 'error';
     c.error = err.message;
     renderCard(idx);
   }
 }
 
-function pollCard(idx) {
-  const c = cardData[idx];
+function pollCard(idx, c = cardData[idx], jobId = c?.jobId) {
+  if (!c || !jobId || cardData[idx] !== c) return;
+  stopCardPolling(c);
+  const generation = c._pollGeneration;
+  const attempt = c._downloadAttempt;
+  const current = () => isCurrentCardAttempt(idx, c, attempt)
+    && c.jobId === jobId && c._pollGeneration === generation && !c.cancelRequested;
   const poll = async () => {
+    if (!current()) return;
     c._pollInterval = null;
-    if (c.cancelRequested) return;
     let keepPolling = true;
+    const controller = new AbortController();
+    c._pollController = controller;
     try {
-      const res = await fetch(`/api/status/${c.jobId}`);
+      const res = await fetch(`/api/status/${encodeURIComponent(jobId)}`, { signal: controller.signal });
       const data = await res.json();
-      // Ignore stale poll response if user cancelled while we were waiting
-      if (c.cancelRequested) {
-        return;
-      }
+      if (!current()) return;
+      if (!res.ok) throw new Error(data.error || 'Lost connection to server');
       if (data.progress) {
         c.progress = data.progress;
       }
@@ -915,11 +982,12 @@ function pollCard(idx) {
           request: completedRequest,
         };
         c.status = 'done';
+        c.actionError = null;
         c.resumable = false;
         c.filename = data.filename;
         c.activeRequest = null;
-        if (!notifiedJobs.has(c.jobId)) {
-          notifiedJobs.add(c.jobId);
+        if (!notifiedJobs.has(jobId)) {
+          notifiedJobs.add(jobId);
           if (window.electronAPI?.notify) window.electronAPI.notify('MediaDrop 下载完成', data.filename || c.title || '文件已保存');
         }
         renderCard(idx);
@@ -934,7 +1002,7 @@ function pollCard(idx) {
         c.status = 'cancelled';
         renderCard(idx);
       } else if (data.status === 'paused') {
-        // Keep polling but don't change status (user controls it)
+        c.status = 'paused';
         c.progress = data.progress;
         renderCard(idx);
       } else if (data.status === 'queued' || data.status === 'starting') {
@@ -944,13 +1012,16 @@ function pollCard(idx) {
         c.status = 'downloading';
         renderCard(idx);
       }
-    } catch {
+    } catch (error) {
+      if (!current() || error.name === 'AbortError') return;
       keepPolling = false;
       c.status = 'error';
-      c.error = 'Lost connection to server';
+      c.error = error.message || 'Lost connection to server';
       renderCard(idx);
+    } finally {
+      if (c._pollController === controller) c._pollController = null;
     }
-    if (keepPolling && !c.cancelRequested) {
+    if (keepPolling && current()) {
       c._pollInterval = setTimeout(poll, 1000);
     }
   };
@@ -961,8 +1032,10 @@ async function dlAll() {
   const btn = document.querySelector('.dl-all-btn');
   if (btn) { btn.disabled = true; btn.textContent = '正在下载...'; }
 
-  for (let i = 0; i < cardData.length; i++) {
-    if (cardData[i].status === 'ready') {
+  const batch = cardData;
+  for (let i = 0; i < batch.length; i++) {
+    if (cardData !== batch) break;
+    if (batch[i].status === 'ready') {
       await dlCard(i);
     }
   }
@@ -999,6 +1072,7 @@ async function taskAction(id, action, extra = {}) {
 
 function taskButtons(task) {
   const id = attr(task.id);
+  if (task.status === 'starting' || task.status === 'interrupted') return `<button title="取消" data-click-action="task-action" data-job-id="${id}" data-task-action="cancel">&times;</button>`;
   if (task.status === 'queued') return `<button title="上移" data-click-action="task-action" data-job-id="${id}" data-task-action="reorder" data-direction="up">&uarr;</button><button title="下移" data-click-action="task-action" data-job-id="${id}" data-task-action="reorder" data-direction="down">&darr;</button><button title="取消" data-click-action="task-action" data-job-id="${id}" data-task-action="cancel">&times;</button>`;
   if (task.status === 'downloading' || task.status === 'paused') return `<button title="${task.status === 'paused' ? '继续' : '暂停'}" data-click-action="task-action" data-job-id="${id}" data-task-action="pause">${task.status === 'paused' ? '&#9654;' : '&#10074;&#10074;'}</button><button title="取消" data-click-action="task-action" data-job-id="${id}" data-task-action="cancel">&times;</button>`;
   if (task.status === 'done') {

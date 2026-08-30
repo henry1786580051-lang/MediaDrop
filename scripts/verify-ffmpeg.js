@@ -1,4 +1,5 @@
 const fs = require("fs");
+const path = require("path");
 const { spawnSync } = require("child_process");
 
 const PE_MACHINES = new Map([
@@ -41,6 +42,11 @@ function runFfmpeg(binary, args) {
   return `${result.stdout || ""}\n${result.stderr || ""}`;
 }
 
+function hasEncoder(output, name) {
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^\\s*[VAS]\\S*\\s+${escapedName}\\s`, "m").test(output);
+}
+
 function verifyFfmpeg(binary, expectedArch, expectedVersion = "8.1.2") {
   const actualArch = detectExecutableArchitecture(binary);
   if (actualArch !== expectedArch) {
@@ -55,11 +61,24 @@ function verifyFfmpeg(binary, expectedArch, expectedVersion = "8.1.2") {
   }
 
   const encoderOutput = runFfmpeg(binary, ["-hide_banner", "-encoders"]);
-  if (!encoderOutput.includes("libmp3lame")) {
+  if (!hasEncoder(encoderOutput, "libmp3lame")) {
     throw new Error("FFmpeg is missing the libmp3lame encoder");
   }
+  if (!hasEncoder(encoderOutput, "png")) {
+    throw new Error("FFmpeg is missing the PNG encoder required for embedded thumbnails");
+  }
 
-  console.log(`FFmpeg verification passed: ${expectedVersion}, ${actualArch}, libmp3lame`);
+  const probe = path.join(path.dirname(binary), /\.exe$/i.test(binary) ? "ffprobe.exe" : "ffprobe");
+  if (!fs.existsSync(probe)) throw new Error("Bundled FFprobe is missing");
+  if (detectExecutableArchitecture(probe) !== expectedArch) {
+    throw new Error(`FFprobe architecture mismatch: expected ${expectedArch}`);
+  }
+  const probeOutput = runFfmpeg(probe, ["-version"]);
+  if (!new RegExp(`^ffprobe version n?${escapedVersion}(?:[ .-]|$)`, "m").test(probeOutput)) {
+    throw new Error(`FFprobe version mismatch: expected ${expectedVersion}`);
+  }
+
+  console.log(`FFmpeg/FFprobe verification passed: ${expectedVersion}, ${actualArch}, libmp3lame, png`);
 }
 
 if (require.main === module) {
@@ -70,4 +89,4 @@ if (require.main === module) {
   verifyFfmpeg(binary, expectedArch, expectedVersion);
 }
 
-module.exports = { detectExecutableArchitecture, verifyFfmpeg };
+module.exports = { detectExecutableArchitecture, hasEncoder, verifyFfmpeg };

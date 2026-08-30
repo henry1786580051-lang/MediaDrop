@@ -1,7 +1,7 @@
 name: Build & Release
 
 env:
-  YTDLP_VERSION: '2026.07.04'
+  YTDLP_VERSION: '2026.08.19'
   FFMPEG_VERSION: '8.1.2'
   FFMPEG_WINDOWS_RELEASE: 'autobuild-2026-08-17-13-05'
 
@@ -169,6 +169,7 @@ jobs:
           printf '%s  %s\n' '${{ matrix.ffmpeg_sha256 }}' ffmpeg.zip | sha256sum -c -
           7z x ffmpeg.zip -obundled-ffmpeg
           cp bundled-ffmpeg/*/bin/ffmpeg.exe bundled-bin/ffmpeg.exe
+          cp bundled-ffmpeg/*/bin/ffprobe.exe bundled-bin/ffprobe.exe
 
       - name: Verify native download tools
         shell: bash

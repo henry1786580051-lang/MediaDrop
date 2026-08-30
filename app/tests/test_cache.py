@@ -511,7 +511,7 @@ class CacheLifecycleTests(unittest.TestCase):
             mock.patch.object(server, "get_cookie_args", return_value=[]),
             mock.patch.object(server, "get_ffmpeg_dir", return_value=None),
             mock.patch.object(server, "get_ytdlp_env", return_value={}),
-            mock.patch.object(server.shutdown_event, "wait", return_value=False),
+            mock.patch.object(server, "wait_for_download_retry", return_value=False),
             mock.patch.object(server.subprocess, "Popen", side_effect=fail_after_partial),
         ]
         for patcher in patches:
@@ -574,7 +574,7 @@ class CacheLifecycleTests(unittest.TestCase):
             mock.patch.object(server, "get_cookie_args", return_value=[]),
             mock.patch.object(server, "get_ffmpeg_dir", return_value=None),
             mock.patch.object(server, "get_ytdlp_env", return_value={}),
-            mock.patch.object(server.shutdown_event, "wait", return_value=False),
+            mock.patch.object(server, "wait_for_download_retry", return_value=False),
             mock.patch.object(server.subprocess, "Popen", side_effect=fail_then_finish),
         ]
         for patcher in patches:

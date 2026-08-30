@@ -15,6 +15,7 @@ python3 app.py
 
 - `config.json`：下载位置、代理、Cookie 方式和并发数
 - `jobs.sqlite3`：任务历史与可恢复状态
+- `server.lock`：后端运行期间的数据目录锁，退出时释放，不需要手动删除
 - `.mediadrop-cache/`：未完成任务的分段文件
 - `tools/`：应用内校验更新的 yt-dlp
 
@@ -28,4 +29,4 @@ python3 app.py
 npm test
 ```
 
-测试覆盖格式状态隔离、ETA、缓存生命周期、任务恢复、API 鉴权、并发配置和 yt-dlp 校验更新。
+测试覆盖格式状态与异步响应隔离、ETA、缓存生命周期、任务恢复及取消竞争、数据目录锁、API 鉴权、并发配置、封装约束、诊断脱敏和 yt-dlp 版本选择与校验更新。

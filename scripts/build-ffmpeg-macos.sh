@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT_PATH="${1:-$ROOT_DIR/bundled-bin/ffmpeg}"
+PROBE_OUTPUT_PATH="$(dirname "$OUTPUT_PATH")/ffprobe"
 FFMPEG_VERSION="8.1.2"
 FFMPEG_ARCHIVE="ffmpeg-n${FFMPEG_VERSION}.tar.gz"
 FFMPEG_SOURCE_DIR="FFmpeg-n${FFMPEG_VERSION}"
@@ -13,7 +14,7 @@ LAME_ARCHIVE="lame-${LAME_VERSION}.tar.gz"
 LAME_URL="https://downloads.sourceforge.net/project/lame/lame/${LAME_VERSION}/${LAME_ARCHIVE}"
 LAME_SHA256="ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e"
 SOURCE_CACHE="${MEDIADROP_FFMPEG_SOURCE_CACHE:-$ROOT_DIR/build/ffmpeg-sources}"
-BINARY_CACHE="${MEDIADROP_FFMPEG_BINARY_CACHE:-$ROOT_DIR/build/ffmpeg-${FFMPEG_VERSION}-macos-arm64-v1}"
+BINARY_CACHE="${MEDIADROP_FFMPEG_BINARY_CACHE:-$ROOT_DIR/build/ffmpeg-${FFMPEG_VERSION}-macos-arm64-v3}"
 MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
 export MACOSX_DEPLOYMENT_TARGET
 
@@ -49,15 +50,19 @@ download_verified() {
 
 validate_binary() {
   local binary="$1"
+  local tool="${2:-ffmpeg}"
   local version_output
   local encoder_output
   local binary_minos
   [[ -x "$binary" ]] || return 1
   file "$binary" | grep -q 'arm64' || return 1
   version_output="$("$binary" -version 2>&1)"
-  printf '%s\n' "$version_output" | sed -n '1p' | grep -Eq "ffmpeg version n?${FFMPEG_VERSION}([ .-]|$)" || return 1
-  encoder_output="$("$binary" -hide_banner -encoders 2>&1)"
-  printf '%s\n' "$encoder_output" | grep 'libmp3lame' >/dev/null || return 1
+  printf '%s\n' "$version_output" | sed -n '1p' | grep -Eq "${tool} version n?${FFMPEG_VERSION}([ .-]|$)" || return 1
+  if [[ "$tool" == "ffmpeg" ]]; then
+    encoder_output="$("$binary" -hide_banner -encoders 2>&1)"
+    printf '%s\n' "$encoder_output" | grep 'libmp3lame' >/dev/null || return 1
+    printf '%s\n' "$encoder_output" | grep -Eq '[[:space:]]png[[:space:]]' || return 1
+  fi
   binary_minos="$(vtool -show-build "$binary" 2>/dev/null | awk '$1 == "minos" { print $2; exit }')"
   [[ "$binary_minos" == "$MACOSX_DEPLOYMENT_TARGET" ]] || return 1
 
@@ -70,9 +75,10 @@ validate_binary() {
 
 mkdir -p "$SOURCE_CACHE" "$BINARY_CACHE" "$(dirname "$OUTPUT_PATH")"
 
-if validate_binary "$BINARY_CACHE/ffmpeg"; then
+if validate_binary "$BINARY_CACHE/ffmpeg" && validate_binary "$BINARY_CACHE/ffprobe" ffprobe; then
   cp "$BINARY_CACHE/ffmpeg" "$OUTPUT_PATH"
-  chmod +x "$OUTPUT_PATH"
+  cp "$BINARY_CACHE/ffprobe" "$PROBE_OUTPUT_PATH"
+  chmod +x "$OUTPUT_PATH" "$PROBE_OUTPUT_PATH"
   echo "Using cached FFmpeg ${FFMPEG_VERSION} build."
   exit 0
 fi
@@ -109,20 +115,24 @@ tar -xf "$SOURCE_CACHE/$FFMPEG_ARCHIVE" -C "$WORK_DIR"
     --disable-debug \
     --disable-doc \
     --disable-ffplay \
-    --disable-ffprobe \
+    --enable-ffprobe \
     --enable-gpl \
     --enable-libmp3lame \
     --enable-securetransport \
+    --enable-zlib \
     --extra-cflags="-I../prefix/include -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET" \
     --extra-ldflags="-L../prefix/lib -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
-  make -j "$JOBS" ffmpeg
+  make -j "$JOBS" ffmpeg ffprobe
   cp ffmpeg "$BINARY_CACHE/ffmpeg"
+  cp ffprobe "$BINARY_CACHE/ffprobe"
 )
 
-chmod +x "$BINARY_CACHE/ffmpeg"
-strip "$BINARY_CACHE/ffmpeg"
+chmod +x "$BINARY_CACHE/ffmpeg" "$BINARY_CACHE/ffprobe"
+strip "$BINARY_CACHE/ffmpeg" "$BINARY_CACHE/ffprobe"
 validate_binary "$BINARY_CACHE/ffmpeg"
+validate_binary "$BINARY_CACHE/ffprobe" ffprobe
 cp "$BINARY_CACHE/ffmpeg" "$OUTPUT_PATH"
-chmod +x "$OUTPUT_PATH"
+cp "$BINARY_CACHE/ffprobe" "$PROBE_OUTPUT_PATH"
+chmod +x "$OUTPUT_PATH" "$PROBE_OUTPUT_PATH"
 
 echo "Built FFmpeg ${FFMPEG_VERSION} for macOS ARM64."

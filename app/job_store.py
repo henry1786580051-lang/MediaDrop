@@ -6,6 +6,15 @@ import time
 from contextlib import closing, contextmanager
 
 
+ACTIVE_STATUSES = frozenset(("queued", "starting", "downloading", "paused", "interrupted"))
+
+
+def is_recoverable_job(job):
+    return job.get("status") in ACTIVE_STATUSES or (
+        job.get("status") == "error" and bool(job.get("resumable"))
+    )
+
+
 PERSISTED_FIELDS = (
     "status",
     "url",
@@ -93,14 +102,36 @@ class JobStore:
             rows = connection.execute(
                 "SELECT id, payload FROM jobs ORDER BY updated_at DESC LIMIT ?", (limit,)
             ).fetchall()
+        return self._decode_rows(rows)
+
+    @staticmethod
+    def _decode_rows(rows):
         result = []
         for row in rows:
             try:
                 payload = json.loads(row["payload"])
             except (TypeError, ValueError):
                 continue
+            if not isinstance(payload, dict):
+                continue
             payload["id"] = row["id"]
             result.append(payload)
+        return result
+
+    def load_for_restore(self, history_limit=200):
+        history_limit = max(1, min(int(history_limit), 1000))
+        with self.lock, self._connection() as connection:
+            rows = connection.execute(
+                "SELECT id, payload FROM jobs ORDER BY updated_at DESC"
+            ).fetchall()
+        result = []
+        history_count = 0
+        for job in self._decode_rows(rows):
+            if is_recoverable_job(job):
+                result.append(job)
+            elif history_count < history_limit:
+                result.append(job)
+                history_count += 1
         return result
 
     def delete(self, job_id):
@@ -110,11 +141,11 @@ class JobStore:
     def trim(self, keep=200):
         keep = max(20, min(int(keep), 1000))
         with self.lock, self._connection() as connection:
-            connection.execute(
-                """
-                DELETE FROM jobs WHERE id IN (
-                    SELECT id FROM jobs ORDER BY updated_at DESC LIMIT -1 OFFSET ?
-                )
-                """,
-                (keep,),
+            rows = connection.execute(
+                "SELECT id, payload FROM jobs ORDER BY updated_at DESC"
+            ).fetchall()
+            terminal = [job for job in self._decode_rows(rows) if not is_recoverable_job(job)]
+            connection.executemany(
+                "DELETE FROM jobs WHERE id = ?",
+                [(job["id"],) for job in terminal[keep:]],
             )

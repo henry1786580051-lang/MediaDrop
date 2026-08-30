@@ -8,6 +8,7 @@ const crypto = require("crypto");
 const {
   appendBoundedText,
   compareVersions,
+  ensureSingleInstance,
   getDevelopmentPythonCandidates,
   isSafeExternalUrl,
   isSupportedProxyUrl,
@@ -20,6 +21,7 @@ const {
 } = require("./electron-utils");
 
 let mainWindow = null;
+const isPrimaryInstance = ensureSingleInstance(app, () => mainWindow);
 let flaskProcess = null;
 let PORT = null;
 const API_TOKEN = crypto.randomBytes(32).toString("hex");
@@ -282,8 +284,8 @@ function checkDependencies() {
     if (app.isPackaged) {
       const binDir = getBinDir();
       const required = process.platform === "win32"
-        ? ["mediadrop-server.exe", "yt-dlp.exe", "ffmpeg.exe"]
-        : ["mediadrop-server", "yt-dlp", "ffmpeg"];
+        ? ["mediadrop-server.exe", "yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe"]
+        : ["mediadrop-server", "yt-dlp", "ffmpeg", "ffprobe"];
       const missing = required.filter(name => !fs.existsSync(path.join(binDir, name)));
       resolve(missing);
       return;
@@ -293,6 +295,7 @@ function checkDependencies() {
       { cmd: getPythonPath(), args: ["--version"], name: "Python 3" },
       { cmd: "yt-dlp", args: ["--version"], name: "yt-dlp" },
       { cmd: "ffmpeg", args: ["-version"], name: "ffmpeg" },
+      { cmd: "ffprobe", args: ["-version"], name: "ffprobe" },
     ];
 
     Promise.all(checks.map(({ cmd, args, name }) => new Promise((done) => {
@@ -525,11 +528,15 @@ ipcMain.handle("open-app-update-download", async () => {
 // --- App lifecycle ---
 
 app.whenReady().then(async () => {
+  if (!isPrimaryInstance) return;
   const missing = await checkDependencies();
 
   if (missing.length > 0) {
+    const brewPackages = [...new Set(missing.map((name) => (
+      name === "ffprobe" ? "ffmpeg" : name.toLowerCase().replace(" ", "-")
+    )))];
     const installHint = process.platform === "darwin"
-      ? `Install with:\n  brew install ${missing.map((m) => m.toLowerCase().replace(" ", "-")).join(" ")}`
+      ? `Install with:\n  brew install ${brewPackages.join(" ")}`
       : "Install Python 3, yt-dlp, and FFmpeg, and make sure they are available on PATH.";
     const message = app.isPackaged
       ? `Bundled dependencies are missing: ${missing.join(", ")}\n\nThis is a packaging error. Please reinstall MediaDrop.`
@@ -587,7 +594,7 @@ for (const signalName of ["SIGINT", "SIGTERM"]) {
 
 // macOS dock click — reopen window if all were closed
 app.on("activate", () => {
-  if (mainWindow === null) {
+  if (isPrimaryInstance && PORT && mainWindow === null) {
     createWindow();
   }
 });

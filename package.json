@@ -1,6 +1,6 @@
 {
   "name": "mediadrop",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Self-hosted video and audio downloader",
   "author": "MediaDrop",
   "main": "main.js",
@@ -10,7 +10,7 @@
   "scripts": {
     "start": "electron .",
     "test": "npm run test:frontend && npm run test:electron && npm run test:cache",
-    "test:frontend": "node scripts/test-format-state.js",
+    "test:frontend": "node scripts/test-format-state.js && node scripts/test-frontend-lifecycle.js",
     "test:electron": "node scripts/test-electron-utils.js",
     "test:cache": "python3 -B -m unittest discover -s app/tests -v",
     "build:bin": "bash scripts/build-bin.sh",
