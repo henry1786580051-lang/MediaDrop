@@ -3,7 +3,7 @@ name: Build & Release
 env:
   YTDLP_VERSION: '2026.08.19'
   FFMPEG_VERSION: '8.1.2'
-  FFMPEG_WINDOWS_RELEASE: 'autobuild-2026-08-17-13-05'
+  FFMPEG_WINDOWS_RELEASE: 'autobuild-2026-09-11-13-20'
 
 on:
   push:
@@ -125,12 +125,12 @@ jobs:
         include:
           - arch: x64
             runner: windows-latest
-            ffmpeg_asset: ffmpeg-n8.1.2-44-g7c533d0f86-win64-gpl-8.1.zip
-            ffmpeg_sha256: 19b9b43e6df8839473ba22c8e22bf14b937c1e2ca40ecbd19d58afedc83ac908
+            ffmpeg_asset: ffmpeg-n8.1.2-52-g5a03dfa0f6-win64-gpl-8.1.zip
+            ffmpeg_sha256: dbc1cb948c6deb6bbc1b12fab563f4ceb1b81e330c9902269288947bb7307d90
           - arch: arm64
             runner: windows-11-arm
-            ffmpeg_asset: ffmpeg-n8.1.2-44-g7c533d0f86-winarm64-gpl-8.1.zip
-            ffmpeg_sha256: bedbdfaf298650e9fc25f35c14e948db37b969d7a3bf973e7b6861ef62444031
+            ffmpeg_asset: ffmpeg-n8.1.2-52-g5a03dfa0f6-winarm64-gpl-8.1.zip
+            ffmpeg_sha256: 3e55cb856f83595e62d62ab6f601f56547cc5afa6fd4710c5c967c6567026d16
     runs-on: ${{ matrix.runner }}
 
     steps:
