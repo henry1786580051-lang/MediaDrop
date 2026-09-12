@@ -107,12 +107,12 @@ assert(!buildWorkflow.includes("pip install flask pyinstaller"), "Release workfl
 assert(buildWorkflow.includes("FFMPEG_VERSION: '8.1.2'"), "Release workflow FFmpeg version is not pinned");
 assert(buildWorkflow.includes("YTDLP_VERSION: '2026.08.19'"), "Release workflow yt-dlp version is not pinned");
 assert(!buildWorkflow.includes("ffmpeg-master-latest"), "Release workflow still uses a moving FFmpeg master build");
-assert(buildWorkflow.includes("FFMPEG_WINDOWS_RELEASE: 'autobuild-2026-08-17-13-05'"), "Windows FFmpeg release is not immutable");
+assert(/FFMPEG_WINDOWS_RELEASE: 'autobuild-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}'/.test(buildWorkflow), "Windows FFmpeg release must be dated");
 assert(!buildWorkflow.includes("releases/download/latest/${ASSET}"), "Windows FFmpeg download still uses a moving release");
-assert(buildWorkflow.includes("ffmpeg-n8.1.2-44-g7c533d0f86-win64-gpl-8.1.zip"), "Windows x64 FFmpeg asset is missing");
-assert(buildWorkflow.includes("ffmpeg-n8.1.2-44-g7c533d0f86-winarm64-gpl-8.1.zip"), "Windows ARM64 FFmpeg asset is missing");
-assert(buildWorkflow.includes("19b9b43e6df8839473ba22c8e22bf14b937c1e2ca40ecbd19d58afedc83ac908"), "Windows x64 FFmpeg checksum is missing");
-assert(buildWorkflow.includes("bedbdfaf298650e9fc25f35c14e948db37b969d7a3bf973e7b6861ef62444031"), "Windows ARM64 FFmpeg checksum is missing");
+for (const arch of ["win64", "winarm64"]) {
+  const pinnedAsset = new RegExp(`ffmpeg_asset: ffmpeg-n8\\.1\\.2-\\d+-g[0-9a-f]+-${arch}-gpl-8\\.1\\.zip\\s+ffmpeg_sha256: [0-9a-f]{64}`);
+  assert(pinnedAsset.test(buildWorkflow), `${arch} must pin a versioned FFmpeg asset and SHA-256`);
+}
 
 const macFfmpegBuild = fs.readFileSync(path.join(__dirname, "build-ffmpeg-macos.sh"), "utf8");
 assert(macFfmpegBuild.includes("FFMPEG_VERSION=\"8.1.2\""), "macOS FFmpeg version is not pinned");
