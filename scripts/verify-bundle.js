@@ -16,7 +16,7 @@ function verifyMacAppSignature(appPath, commandRunner = execFileSync) {
 
 function verifyBundle(appPath = defaultAppPath) {
   const appBinDir = path.join(appPath, "Contents", "Resources", "bin");
-  const required = ["mediadrop-server", "yt-dlp", "ffmpeg", "ffprobe"];
+  const required = ["mediadrop-server", "yt-dlp", "ffmpeg", "ffprobe", "youtube/yt-dlp-sabr"];
 
   for (const name of required) {
     const file = path.join(appBinDir, name);
@@ -26,6 +26,10 @@ function verifyBundle(appPath = defaultAppPath) {
     fs.accessSync(file, fs.constants.X_OK);
   }
 
+  for (const name of ["server/build/main.js", "server/node_modules/canvas/build/Release/canvas.node", "plugin/yt_dlp_plugins", "manifest.json"]) {
+    if (!fs.existsSync(path.join(appBinDir, "youtube", name))) throw new Error(`Missing YouTube component: ${name}`);
+  }
+  if (!fs.existsSync(path.join(appPath, "Contents", "Resources", "native", "liquid-glass.node"))) throw new Error("Missing native Liquid Glass bridge");
   verifyFfmpeg(path.join(appBinDir, "ffmpeg"), "arm64", "8.1.2");
   verifyMacAppSignature(appPath);
 

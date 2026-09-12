@@ -20,7 +20,13 @@ const {
   stopProcessTree,
 } = require("./electron-utils");
 
+const nativeGlass = require("./native-glass");
+nativeGlass.install(require("electron"));
+
 let mainWindow = null;
+let settingsWindow = null;
+let desktop = null;
+const { installDesktop } = require("./desktop-integration");
 const isPrimaryInstance = ensureSingleInstance(app, () => mainWindow);
 let flaskProcess = null;
 let PORT = null;
@@ -35,8 +41,8 @@ let updateState = {
 
 function publishUpdateState(nextState) {
   updateState = { ...updateState, ...nextState };
-  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isLoading()) {
-    mainWindow.webContents.send("app-update-state", updateState);
+  for (const win of [mainWindow, settingsWindow]) {
+    if (win && !win.isDestroyed() && !win.webContents.isLoading()) win.webContents.send("app-update-state", updateState);
   }
   return updateState;
 }
@@ -427,17 +433,26 @@ async function getDownloadDir() {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1000,
-    height: 750,
+    width: 1180,
+    height: 780,
+    minWidth: 760,
+    minHeight: 540,
+    ...(desktop?.savedBounds() || {}),
+    ...(process.platform === "darwin" ? { titleBarStyle: "hiddenInset", trafficLightPosition: { x: 16, y: 20 } } : {}),
+    backgroundColor: "#202226",
+    ...nativeGlass.windowOptions(app),
     title: "MediaDrop",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
+      backgroundThrottling: false,
     },
   });
 
+  if (process.platform === "darwin") mainWindow.setWindowButtonVisibility(true);
+  desktop?.attachWindow(mainWindow);
   const localOrigin = `http://127.0.0.1:${PORT}`;
   mainWindow.webContents.session.cookies.set({
     url: localOrigin,
@@ -473,8 +488,42 @@ function createWindow() {
   });
 }
 
-// --- IPC handlers (called from renderer via preload.js) ---
+async function readDesktopJobs() {
+  const response = await fetch(`http://127.0.0.1:${PORT}/api/jobs?limit=200&include_active=1`, {
+    headers: { "X-MediaDrop-Token": API_TOKEN }, signal: AbortSignal.timeout(5000),
+  });
+  if (!response.ok) throw new Error("Unable to read download queue");
+  return (await response.json()).jobs || [];
+}
 
+function openSettingsWindow(tab) {
+  const revealTab = win => { if (tab === "network") { if (win.webContents.isLoading()) win.webContents.once("did-finish-load", () => win.webContents.send("desktop-command", "settings-network")); else win.webContents.send("desktop-command", "settings-network"); } };
+  if (settingsWindow && !settingsWindow.isDestroyed()) { settingsWindow.show(); settingsWindow.focus(); revealTab(settingsWindow); return; }
+  settingsWindow = new BrowserWindow({ width: 680, height: 740, minWidth: 560, minHeight: 520, title: "MediaDrop 设置", minimizable: false,
+    ...(process.platform === "darwin" ? { titleBarStyle: "hiddenInset", trafficLightPosition: { x: 16, y: 20 } } : {}),
+    ...nativeGlass.windowOptions(app),
+    webPreferences: { preload: path.join(__dirname, "preload.js"), nodeIntegration: false, contextIsolation: true, sandbox: true } });
+  if (process.platform === "darwin") settingsWindow.setWindowButtonVisibility(true);
+  if (tab === "network") settingsWindow.webContents.once("did-finish-load", () => settingsWindow?.webContents.send("desktop-command", "settings-network"));
+  const origin = `http://127.0.0.1:${PORT}`;
+  settingsWindow.webContents.session.cookies.set({ url: origin, name: "mediadrop_token", value: API_TOKEN, httpOnly: true, sameSite: "strict" })
+    .then(() => { if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.loadURL(`${origin}/?settings=1`); });
+  settingsWindow.webContents.on("will-navigate", (event, url) => { if (!url.startsWith(`${origin}/`)) event.preventDefault(); });
+  settingsWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  settingsWindow.on("closed", () => { settingsWindow = null; });
+}
+
+// --- IPC handlers (called from renderer via preload.js) ---
+ipcMain.handle("close-settings-window", event => {
+  if (!settingsWindow || settingsWindow.isDestroyed() || event.sender !== settingsWindow.webContents || event.senderFrame !== event.sender.mainFrame) return false;
+  settingsWindow.close();
+  return true;
+});
+
+ipcMain.handle("select-media-file", async () => {
+  const result = await dialog.showOpenDialog(mainWindow || undefined, {title:"重新定位已下载文件",properties:["openFile"],filters:[{name:"媒体文件",extensions:["mp4","mkv","webm","mov","mp3","m4a","opus","wav","jpg","jpeg","png","webp"]}]});
+  return result.canceled ? null : result.filePaths[0] || null;
+});
 ipcMain.handle("select-folder", async () => {
   const result = await dialog.showOpenDialog(mainWindow || undefined, {
     properties: ["openDirectory", "createDirectory"],
@@ -506,13 +555,8 @@ ipcMain.handle("show-item-in-folder", (_event, filePath) => {
   return true;
 });
 
-ipcMain.handle("show-notification", (_event, title, body) => {
-  if (!mainWindow || mainWindow.isDestroyed()) return false;
-  const { Notification } = require("electron");
-  if (!Notification.isSupported()) return false;
-  new Notification({ title: String(title).slice(0, 80), body: String(body).slice(0, 200) }).show();
-  return true;
-});
+// Completion notifications are aggregated by the main process, including hidden windows.
+ipcMain.handle("show-notification", () => false);
 
 ipcMain.handle("get-app-update-state", () => updateState);
 
@@ -555,6 +599,8 @@ app.whenReady().then(async () => {
     const proxyUrl = detectProxy();
     PORT = await startFlaskServer(proxyUrl);
     console.log(`[startup] Backend ready on port ${PORT}`);
+    desktop = installDesktop({ electron: require("electron"), getMainWindow: () => mainWindow,
+      createMainWindow: createWindow, readJobs: readDesktopJobs, openSettingsWindow });
     createWindow();
     const firstUpdateCheck = setTimeout(() => checkForAppUpdate(false), 30000);
     firstUpdateCheck.unref();
@@ -579,10 +625,9 @@ function stopFlaskServer() {
   }
 }
 
-app.on("before-quit", stopFlaskServer);
+app.on("will-quit", stopFlaskServer);
 app.on("window-all-closed", () => {
-  stopFlaskServer();
-  app.quit();
+  if (process.platform !== "darwin") app.quit();
 });
 
 for (const signalName of ["SIGINT", "SIGTERM"]) {
@@ -594,7 +639,10 @@ for (const signalName of ["SIGINT", "SIGTERM"]) {
 
 // macOS dock click — reopen window if all were closed
 app.on("activate", () => {
-  if (isPrimaryInstance && PORT && mainWindow === null) {
-    createWindow();
+  if (isPrimaryInstance && PORT) {
+    if (!mainWindow) createWindow();
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
   }
 });

@@ -1,0 +1,14 @@
+const assert = require('node:assert/strict');
+const { summarizeJobs, visibleBounds } = require('../desktop-integration');
+assert.deepEqual(summarizeJobs([]), { count: 0, busy: false, progress: -1 });
+assert.deepEqual(summarizeJobs([{status:'done'},{status:'error'},{status:'cancelled'}]), { count: 0, busy: false, progress: -1 });
+assert.deepEqual(summarizeJobs([{status:'paused',progress:{percent:40}}]), {count:1,busy:false,progress:.4});
+assert.deepEqual(summarizeJobs([{status:'downloading',progress:{percent:20}},{status:'queued'}]), {count:2,busy:true,progress:2});
+assert.equal(summarizeJobs([{status:'downloading',progress:{percent:200}}]).progress,1);
+assert.equal(summarizeJobs([{status:'interrupted'}]).busy,true);
+const displays=[{workArea:{x:0,y:25,width:1440,height:875}}];
+assert.deepEqual(visibleBounds({x:4000,y:0,width:1100,height:700},displays),{});
+assert.deepEqual(visibleBounds({x:1200,y:750,width:1100,height:700},displays),{x:340,y:200,width:1100,height:700});
+assert.deepEqual(visibleBounds({x:0,y:25,width:2000,height:1200},displays),{x:0,y:25,width:1440,height:875});
+assert.deepEqual(visibleBounds({x:NaN,y:0,width:1000,height:700},displays),{});
+console.log('OK desktop activity, pause handling, and display restoration');

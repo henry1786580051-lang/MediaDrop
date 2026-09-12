@@ -51,3 +51,6 @@ fi
 "$BUNDLED_BIN/ffmpeg" -hide_banner -encoders 2>&1 | grep 'libmp3lame' >/dev/null
 "$BUNDLED_BIN/ffmpeg" -hide_banner -encoders 2>&1 | grep -Eq '[[:space:]]png[[:space:]]'
 "$BUNDLED_BIN/ffprobe" -version 2>&1 | sed -n '1p' | grep -Eq "ffprobe version n?${FFMPEG_VERSION}([ .-]|$)"
+
+# Bundle the same YouTube engine used for parsing and downloading.
+bash "$ROOT_DIR/scripts/prepare-youtube.sh" "$BUNDLED_BIN/youtube"

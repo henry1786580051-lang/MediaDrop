@@ -66,3 +66,8 @@ const imageWithVideoOptions = helpers.buildDownloadRequest(card, "image");
 assert(Object.keys(imageWithVideoOptions.options).length === 0, "JPG state included irrelevant video options");
 
 console.log("format completion state OK");
+const safeStart = source.indexOf('function safeMediaUrl');
+const safeEnd = source.indexOf('function friendlyError', safeStart);
+const safeUrl = new Function(`${source.slice(safeStart, safeEnd)}; return safeMediaUrl;`)();
+assert(safeUrl('https://example.com/cover?a=1&token=abc') === 'https://example.com/cover?a=1&token=abc', 'URL validation must not HTML-escape signed parameters');
+assert(safeUrl('javascript:alert(1)') === '', 'Non-media schemes must stay blocked');

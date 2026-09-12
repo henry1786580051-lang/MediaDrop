@@ -16,6 +16,7 @@ python3 -m venv "$BUILD_OUTPUT/build-venv"
   --disable-pip-version-check \
   -r "$ROOT_DIR/app/requirements-build.txt"
 PYTHON_BIN="$BUILD_OUTPUT/build-venv/bin/python" npm run build:bin
+npm run build:glass
 
 # Desktop can be managed by macOS File Provider, which may restore FinderInfo
 # while codesign is running. Assemble and sign the app outside that directory.

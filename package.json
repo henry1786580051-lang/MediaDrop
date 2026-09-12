@@ -1,6 +1,6 @@
 {
   "name": "mediadrop",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "Self-hosted video and audio downloader",
   "author": "MediaDrop",
   "main": "main.js",
@@ -10,14 +10,15 @@
   "scripts": {
     "start": "electron .",
     "test": "npm run test:frontend && npm run test:electron && npm run test:cache",
-    "test:frontend": "node scripts/test-format-state.js && node scripts/test-frontend-lifecycle.js",
-    "test:electron": "node scripts/test-electron-utils.js",
+    "test:frontend": "node scripts/test-format-state.js && node scripts/test-frontend-lifecycle.js && node scripts/test-workspace-model.js",
+    "test:electron": "node scripts/test-electron-utils.js && node scripts/test-desktop-integration.js && node scripts/test-native-glass.js",
     "test:cache": "python3 -B -m unittest discover -s app/tests -v",
     "build:bin": "bash scripts/build-bin.sh",
     "verify:bundle": "node scripts/verify-bundle.js",
     "verify:mac": "npm run verify:bundle && hdiutil verify dist/*.dmg",
     "dist": "electron-builder",
-    "dist:mac": "bash scripts/build-macos.sh"
+    "dist:mac": "bash scripts/build-macos.sh",
+    "build:glass": "bash scripts/build-liquid-glass.sh"
   },
   "build": {
     "publish": null,
@@ -31,7 +32,16 @@
       ],
       "icon": "icon.png",
       "hardenedRuntime": false,
-      "identity": null
+      "identity": null,
+      "extraResources": [
+        {
+          "from": "build/native",
+          "to": "native",
+          "filter": [
+            "*.node"
+          ]
+        }
+      ]
     },
     "win": {
       "target": [
@@ -64,7 +74,9 @@
     "files": [
       "main.js",
       "preload.js",
-      "electron-utils.js"
+      "electron-utils.js",
+      "desktop-integration.js",
+      "native-glass.js"
     ],
     "extraResources": [
       {

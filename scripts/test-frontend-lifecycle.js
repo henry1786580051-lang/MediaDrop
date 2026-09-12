@@ -68,11 +68,37 @@ async function test(name, run) {
 }
 
 (async () => {
+  await test("new links preserve existing downloads and draft choices", async () => {
+    const h = createHarness(url => url === "/api/download" ? response({ job_id: "first" }) : response({ status: "downloading" }));
+    h.context.cardData[0].preset = "compatible";
+    await h.context.dlCard(0);
+    const first = h.context.cardData[0];
+    await h.context.go();
+    assert.equal(h.context.cardData.length, 2);
+    assert.equal(h.context.cardData[0], first);
+    assert.equal(first.preset, "compatible");
+    assert.equal(first.jobId, "first");
+    assert.equal(h.context.cardData[1].title, "New");
+    assert.equal(h.timers.size, 1);
+  });
+
+  await test("verified HDR subtype stays with the completed download", async () => {
+    const h = createHarness(url => url === "/api/download"
+      ? response({ job_id: "hdr-job" })
+      : response({ status: "done", filename: "hdr.mkv", media_info: { dynamic_range: "HDR10+" } }));
+    await h.context.dlCard(0);
+    await h.tick();
+    const card = h.context.cardData[0];
+    assert.equal(h.context.completedDownloadFor(card).mediaInfo.dynamic_range, "HDR10+");
+    h.context.setOption(0, "container", "mkv");
+    assert.equal(h.context.completedDownloadFor(card), null);
+  });
+
   await test("late download response cannot attach to a new card", async () => {
     const pending = deferred();
     const h = createHarness(() => pending.promise);
     const downloading = h.context.dlCard(0);
-    await h.context.go();
+    h.context.cardData = [{ url: "https://example.com/new", title: "New", status: "ready", completedDownloads: {} }];
     const renderCount = h.renders.length;
     pending.resolve(response({ job_id: "old-job" }));
     await downloading;
@@ -89,7 +115,7 @@ async function test(name, run) {
     const h = createHarness(url => url === "/api/download" ? response({ job_id: "old-job" }) : pending.promise);
     await h.context.dlCard(0);
     const polling = h.tick();
-    await h.context.go();
+    h.context.cardData = [{ url: "https://example.com/new", title: "New", status: "ready", completedDownloads: {} }];
     pending.resolve(response({ status: "done", filename: "old.mp4" }));
     await polling;
     assert.equal(h.context.cardData[0].status, "ready");
@@ -190,7 +216,7 @@ async function test(name, run) {
     const h = createHarness(() => pending.promise);
     h.context.cardData.push({ url: "https://example.com/second", status: "ready", format: "video" });
     const downloading = h.context.dlAll();
-    await h.context.go();
+    h.context.cardData = [{ url: "https://example.com/new", title: "New", status: "ready", completedDownloads: {} }];
     pending.resolve(response({ job_id: "old-job" }));
     await downloading;
     assert.equal(h.requests.filter(request => request.url === "/api/download").length, 1);
@@ -201,7 +227,7 @@ async function test(name, run) {
     const pending = deferred();
     const h = createHarness(() => pending.promise);
     const downloading = h.context.dlCard(0);
-    await h.context.go();
+    h.context.cardData = [{ url: "https://example.com/new", title: "New", status: "ready", completedDownloads: {} }];
     pending.resolve(response({ error: "Old request failed" }, 500));
     await downloading;
     assert.equal(h.context.cardData[0].status, "ready");

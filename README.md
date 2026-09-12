@@ -3,7 +3,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/Python-3.8+-3776AB?logo=python&logoColor=white)
 ![Flask](https://img.shields.io/badge/Flask-3.0-000000?logo=flask&logoColor=white)
-![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white)
+![Electron](https://img.shields.io/badge/Electron-41-47848F?logo=electron&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)
 
 一个简洁优雅的视频 / 音频下载器，支持 YouTube、TikTok、Instagram、Twitter/X 等 1000+ 网站，一键下载为 MP4、MP3 或 JPG。
@@ -31,6 +31,12 @@
 
 ---
 
+## V1.2.0 更新
+
+新增 YouTube 增强下载、完整编码与帧率选择、四类任务视图，以及 macOS 26 原生 Liquid Glass。外观与默认画质跨重启保存，详情栏和高级选项支持缓动与键盘操作。详见 [更新日志](CHANGELOG.md)。
+
+标准 yt-dlp 可在设置中独立更新；YouTube 增强引擎和配套组件随应用更新。Windows ARM64 安装包使用原生下载引擎和 x64 令牌辅助运行时。macOS 旧系统及减少透明度环境使用实色界面。
+
 ## 🌟 功能特点
 
 ### 📥 核心功能
@@ -38,7 +44,7 @@
 - **🔗 万能下载**：支持 1000+ 网站（基于 [yt-dlp](https://github.com/yt-dlp/yt-dlp)）
 - **🎬 多格式输出**：MP4 视频 / MP3 音频 / JPG 缩略图，自由选择
 - **📊 画质选择**：支持多种分辨率，最高 2160p (4K)
-- **🌈 HDR 识别**：自动区分 SDR、HDR10、HDR10+、HLG 与 Dolby Vision，并支持严格筛选
+- **🌈 HDR 识别**：保留源动态范围，下载后核验 HLG、HDR10+、Dolby Vision、PQ HDR 与 SDR；不确定时保留通用 HDR 标记
 - **🎚️ 下载预设**：推荐、最高画质、节省空间、兼容模式，也可精确选择视频流
 - **📦 批量下载**：一次粘贴多个 URL，自动去重并以最多 4 路并行解析
 - **⏸️ 下载控制**：实时进度追踪，支持暂停 / 恢复 / 取消
@@ -47,7 +53,7 @@
 - **⏱️ 稳定时间估算**：平滑网络波动，区分下载、合并与转码阶段
 - **📂 自定义路径**：自由设置下载保存目录
 - **🌐 智能代理**：自动检测系统代理，支持手动配置，代理不可达时自动降级直连
-- **🔌 端口自适应**：默认端口 8899 被占用时自动切换到下一个可用端口，无需手动干预
+- **🔌 端口自适应**：桌面应用启动时由系统分配可用端口，配置与任务记录独立持久保存
 - **🩺 诊断报告**：一键导出脱敏的环境、配置和最近任务信息，便于定位问题
 
 ### 🎨 界面设计

@@ -61,6 +61,16 @@ class ReviewRegressionTests(unittest.TestCase):
     def run_task(self, job_id="task", **kwargs):
         server.run_download(job_id, "https://example.com/video", "video", None, "Example", **kwargs)
 
+    def test_desktop_listing_keeps_active_tasks_beyond_history_limit(self):
+        self.task("old-paused", "paused")["created_at"] = 1
+        for index in range(205):
+            self.task(f"history-{index}", "cancelled")["created_at"] = index + 2
+        standard = self.client.get("/api/jobs?limit=200").get_json()["jobs"]
+        self.assertEqual(len(standard), 200)
+        desktop = self.client.get("/api/jobs?limit=200&include_active=1").get_json()["jobs"]
+        self.assertEqual(len(desktop), 201)
+        self.assertEqual(sum(job["id"] == "old-paused" for job in desktop), 1)
+
     def test_restore_keeps_paused_task_older_than_history_limit(self):
         self.task("paused", "paused")
         partial = self.partial("paused")

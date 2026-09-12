@@ -1,3 +1,7 @@
+function uiIcon(name) {
+  return `<svg class="ui-icon" aria-hidden="true"><use href="/static/icons.svg#${name}"></use></svg>`;
+}
+
 let cardData = [];
 let parseController = null;
 let taskRefreshTimer = null;
@@ -9,16 +13,21 @@ let settingsMessageTimer = null;
 let currentAppUpdateState = null;
 let dismissedAppUpdateVersion = null;
 
-function openSettings() {
+function openSettings(tab) {
+  if (window.electronAPI?.openSettings && !new URLSearchParams(location.search).has("settings")) { window.electronAPI.openSettings(tab); return; }
+  document.getElementById("settingsDrawer").inert = false;
   document.getElementById('settingsDrawer').classList.add('open');
   document.getElementById('settingsBackdrop').classList.add('open');
   document.getElementById('settingsDrawer').setAttribute('aria-hidden', 'false');
   document.body.classList.add('drawer-open');
+  if (tab) window.mediaWorkspace?.settingsTab(tab);
   if (!settingsLoaded) loadSettings();
   setTimeout(() => document.querySelector('#settingsDrawer .icon-btn').focus(), 50);
 }
 
 function closeSettings() {
+  if (new URLSearchParams(location.search).has("settings")) { if (window.electronAPI?.closeSettings) void window.electronAPI.closeSettings(); else window.close(); return; }
+  document.getElementById("settingsDrawer").inert = true;
   document.getElementById('settingsDrawer').classList.remove('open');
   document.getElementById('settingsBackdrop').classList.remove('open');
   document.getElementById('settingsDrawer').setAttribute('aria-hidden', 'true');
@@ -27,7 +36,9 @@ function closeSettings() {
 }
 
 document.addEventListener('keydown', event => {
-  if (event.key === 'Escape' && document.getElementById('settingsDrawer').classList.contains('open')) {
+  const closeShortcut = new URLSearchParams(location.search).has('settings') && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'w';
+  if ((event.key === 'Escape' || closeShortcut) && document.getElementById('settingsDrawer').classList.contains('open')) {
+    event.preventDefault();
     closeSettings();
   }
 });
@@ -44,12 +55,17 @@ async function loadSettings() {
     const data = await res.json();
     document.getElementById('dlPath').value = data.download_dir || '';
     document.getElementById('proxyUrl').value = data.proxy_url || '';
+    const youtubeMode = document.getElementById('youtubeMode');
+    if (youtubeMode) youtubeMode.value = data.youtube_enhanced ? 'enhanced' : 'standard';
     document.getElementById('cookiesBrowser').value = data.cookies_browser || 'chrome';
     document.getElementById('cookiesFile').value = data.cookies_file || '';
     document.getElementById('maxConcurrent').value = String(data.max_concurrent || 2);
     document.getElementById('authMode').value = data.cookies_file ? 'file' : data.cookies_browser ? 'browser' : 'none';
     updateAuthFields();
     settingsLoaded = true;
+    window.mediaWorkspace?.setFolder(data.download_dir);
+    window.mediaWorkspace?.applyPreferences(data);
+    void loadEngineStatus();
   } catch (err) {
     setSettingsMsg('err', `无法加载设置：${friendlyError(err.message)}`);
   }
@@ -248,6 +264,18 @@ async function testCookies() {
   }
 }
 
+async function loadEngineStatus() {
+  const output = document.getElementById('youtubeEngineVersion');
+  if (!output) return;
+  try {
+    const res = await fetch('/api/engines');
+    if (!res.ok) throw new Error('engine status');
+    const { youtube } = await res.json();
+    output.textContent = youtube.available ? `${youtube.version || '版本未知'}${youtube.mode === 'sabr' ? ' · 使用中' : ' · 未启用'}` : '未安装';
+    document.getElementById('youtubeEngineUpdate').hidden = !window.electronAPI;
+  } catch { output.textContent = '暂时无法读取'; }
+}
+
 async function checkYtdlp() {
   const version = document.getElementById('ytdlpVersion');
   const updateButton = document.getElementById('updateYtdlpBtn');
@@ -259,7 +287,7 @@ async function checkYtdlp() {
     if (!res.ok || data.error) throw new Error(data.error || 'Could not check yt-dlp');
     version.textContent = data.current || '未知版本';
     updateButton.hidden = !data.update_available;
-    const status = data.update_available ? `发现新版本 ${data.latest || ''}` : 'yt-dlp 已是最新版本';
+    const status = data.update_available ? `发现新版本 ${data.latest || ''}` : '标准引擎已是最新版本；YouTube 增强引擎随应用更新';
     setSettingsMsg(data.update_available ? '' : 'ok', status);
   } catch (err) {
     version.textContent = '检查失败';
@@ -276,7 +304,7 @@ async function updateYtdlp() {
     const current = data.version || data.latest || '最新版本';
     document.getElementById('ytdlpVersion').textContent = current;
     document.getElementById('updateYtdlpBtn').hidden = true;
-    setSettingsMsg('ok', `yt-dlp 已更新至 ${current}`);
+    setSettingsMsg('ok', `标准引擎已更新至 ${current}；YouTube 增强引擎随应用更新`);
   } catch (err) {
     setSettingsMsg('err', friendlyError(err.message));
   }
@@ -351,6 +379,7 @@ function progressPhaseLabel(phase) {
     converting_thumbnail: '正在转换封面',
     postprocessing: '正在处理媒体',
     complete: '处理完成',
+    verifying: '正在核验媒体',
   };
   return labels[phase] || '';
 }
@@ -455,7 +484,7 @@ function attr(s) {
 function safeMediaUrl(value) {
   try {
     const url = new URL(value);
-    return url.protocol === 'https:' || url.protocol === 'http:' ? attr(url.href) : '';
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.href : '';
   } catch {
     return '';
   }
@@ -510,7 +539,7 @@ function friendlyError(err) {
 }
 
 document.getElementById('urls').addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); go(); }
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); go(); }
 });
 
 function stopCardPolling(card) {
@@ -538,21 +567,21 @@ async function go() {
   const urls = parseUrls(document.getElementById('urls').value);
   if (!urls.length) return;
 
+  const selectedPreset = document.getElementById('defaultQuality')?.value || 'highest';
   const btn = document.getElementById('goBtn');
   const container = document.getElementById('cards');
   parseController = new AbortController();
   btn.textContent = '取消解析';
-  cardData.forEach(stopCardPolling);
-  container.innerHTML = '';
-  cardData = [];
-
+  const firstIndex = cardData.length;
   urls.forEach(url => cardData.push({ url, status: 'loading' }));
-  cardData.forEach((_card, idx) => renderCard(idx));
+  urls.forEach((_url, index) => renderCard(firstIndex + index));
+  window.mediaWorkspace?.selectCard(firstIndex);
   let nextIndex = 0;
   const worker = async () => {
     while (nextIndex < urls.length) {
-      const idx = nextIndex++;
-      const url = urls[idx];
+      const offset = nextIndex++;
+      const idx = firstIndex + offset;
+      const url = urls[offset];
     try {
       const res = await fetch('/api/info', {
         method: 'POST',
@@ -574,11 +603,12 @@ async function go() {
           uploader: data.uploader || '',
           formats: data.formats || [],
           hasHdr: Boolean(data.has_hdr),
+          youtubeEngine: data.youtube_engine,
           skipBrowserCookies: Boolean(data.skip_browser_cookies),
           cookieWarning: data.cookie_warning || '',
           videoRangeMode: 'auto',
           selectedFormatId: null,
-          preset: 'recommended',
+          preset: selectedPreset,
           options: { container: 'mp4', audio_quality: '192', subtitle_languages: 'zh.*,en.*' },
           completedDownloads: {},
         };
@@ -598,13 +628,22 @@ async function go() {
 
   parseController = null;
   btn.textContent = '解析链接';
+  btn.disabled = !parseUrls(document.getElementById('urls').value).length;
 }
 
 function renderCard(idx) {
+  renderCardContent(idx);
+  window.mediaWorkspace?.render();
+}
+
+function renderCardContent(idx) {
   const c = cardData[idx];
   if (!c) return;
   let el = document.getElementById(`card-${idx}`);
   const advancedOpen = Boolean(el?.querySelector('.advanced-options')?.open);
+  const formatsOpen = Boolean(el?.querySelector('.format-details')?.open);
+  const qualityScroll = el?.querySelector('.quality-row')?.scrollTop || 0;
+  const focused = el?.contains(document.activeElement) ? { ...document.activeElement.dataset } : null;
   if (!el) {
     el = document.createElement('div');
     el.id = `card-${idx}`;
@@ -649,39 +688,24 @@ function renderCard(idx) {
   const isAudio = cardFmt === 'audio';
   const isImage = cardFmt === 'image';
 
-  let thumbHtml;
-  if (isAudio) {
-    thumbHtml = `<div class="no-thumb no-thumb-accent"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>`;
-  } else if (isImage) {
-    thumbHtml = safeMediaUrl(c.thumbnail) ? `<img src="${safeMediaUrl(c.thumbnail)}" alt="">` : `<div class="no-thumb no-thumb-accent"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></div>`;
-  } else if (c.thumbnail) {
-    thumbHtml = safeMediaUrl(c.thumbnail) ? `<img src="${safeMediaUrl(c.thumbnail)}" alt="">` : `<div class="no-thumb"></div>`;
-  } else {
-    thumbHtml = `<div class="no-thumb"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2"/><circle cx="8" cy="8" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></div>`;
-  }
+  const thumbUrl = safeMediaUrl(c.thumbnail);
+  const thumbHtml = thumbUrl && !isAudio
+    ? `<img src="${attr(thumbUrl)}" alt="">`
+    : `<div class="no-thumb">${uiIcon(isAudio ? 'audio' : isImage ? 'image' : 'video')}</div>`;
 
   // Format pills
   const fmtPills = `<div class="fmt-pills">
-    <button class="fmt-pill${cardFmt === 'video' ? ' active' : ''}" data-click-action="set-card-format" data-index="${idx}" data-format="video">MP4</button>
-    <button class="fmt-pill${cardFmt === 'audio' ? ' active' : ''}" data-click-action="set-card-format" data-index="${idx}" data-format="audio">MP3</button>
-    <button class="fmt-pill${cardFmt === 'image' ? ' active' : ''}" data-click-action="set-card-format" data-index="${idx}" data-format="image">JPG</button>
+    <button class="fmt-pill${cardFmt === 'video' ? ' active' : ''}" data-click-action="set-card-format" data-index="${idx}" data-format="video" aria-pressed="${cardFmt === 'video'}">视频</button>
+    <button class="fmt-pill${cardFmt === 'audio' ? ' active' : ''}" data-click-action="set-card-format" data-index="${idx}" data-format="audio" aria-pressed="${cardFmt === 'audio'}">音频</button>
+    <button class="fmt-pill${cardFmt === 'image' ? ' active' : ''}" data-click-action="set-card-format" data-index="${idx}" data-format="image" aria-pressed="${cardFmt === 'image'}">封面</button>
   </div>`;
 
   const rangeMode = c.videoRangeMode || 'auto';
-  const rangePills = `<div class="range-pills">
-    <button class="range-pill${rangeMode === 'auto' ? ' active' : ''}" data-click-action="set-video-range" data-index="${idx}" data-range="auto">自动</button>
-    <button class="range-pill${rangeMode === 'hdr' ? ' active' : ''}" data-click-action="set-video-range" data-index="${idx}" data-range="hdr"${c.hasHdr ? '' : ' disabled'}>仅 HDR</button>
-    <button class="range-pill${rangeMode === 'sdr' ? ' active' : ''}" data-click-action="set-video-range" data-index="${idx}" data-range="sdr">仅 SDR</button>
-  </div>`;
-
+  const rangePills = `<label class="inspector-option"><span>动态范围</span><select data-change-action="set-video-range" data-index="${idx}"><option value="auto"${rangeMode === 'auto' ? ' selected' : ''}>跟随源视频</option><option value="hdr"${rangeMode === 'hdr' ? ' selected' : ''}${c.hasHdr ? '' : ' disabled'}>仅 HDR</option><option value="sdr"${rangeMode === 'sdr' ? ' selected' : ''}>仅 SDR</option></select></label>`;
   const preset = c.preset || 'recommended';
   const webm = c.options?.container === 'webm';
-  const presets = [
-    ['recommended', '推荐'], ['highest', '最高画质'], ['smallest', '节省空间'], ['compatible', '兼容模式']
-  ];
-  const presetPills = `<div class="preset-row">${presets.map(([value, label]) =>
-    `<button class="q-chip${preset === value && !c.selectedFormatId ? ' active' : ''}" data-click-action="set-preset" data-index="${idx}" data-preset="${value}"${webm && value === 'compatible' ? ' disabled title="兼容模式需要 MP4 或 MKV"' : ''}>${label}</button>`
-  ).join('')}</div>`;
+  const presets = [['highest', '最高画质'], ['recommended', '均衡 · 1080p'], ['smallest', '节省空间'], ['compatible', '兼容优先']];
+  const presetPills = `<label class="inspector-option"><span>画质</span><select data-change-action="set-preset" data-index="${idx}">${c.selectedFormatId ? '<option selected disabled>指定格式</option>' : ''}${presets.map(([value, label]) => `<option value="${value}"${preset === value && !c.selectedFormatId ? ' selected' : ''}${webm && value === 'compatible' ? ' disabled' : ''}>${label}</option>`).join('')}</select></label>`;
 
   // Quality chips (only for video)
   let qualityChips = '';
@@ -690,21 +714,33 @@ function renderCard(idx) {
       (!webm || isWebmFormat(f)) && (rangeMode === 'hdr' ? f.hdr : rangeMode === 'sdr' ? !f.hdr : true)
     );
     qualityChips = visibleFormats.map(f => {
-      const size = f.filesize ? ` · ${f.filesize_is_estimate ? '约 ' : ''}${fmtSize(f.filesize)}` : '';
-      const fps = f.fps ? ` · ${Math.round(f.fps)}fps` : '';
-      return `<button class="q-chip${f.id === c.selectedFormatId ? ' active' : ''}" title="${attr((f.vcodec || '') + fps + size)}" data-click-action="pick-format" data-index="${idx}" data-format-id="${attr(String(f.id))}">${esc(f.label)}${esc(size)}</button>`;
+      const size = f.filesize ? `${f.filesize_is_estimate ? '约 ' : ''}${fmtSize(f.filesize)}` : '大小未知';
+      const codec = /av01|av1/i.test(f.vcodec || '') ? 'AV1' : /vp0?9/i.test(f.vcodec || '') ? 'VP9' : /avc|h264/i.test(f.vcodec || '') ? 'H.264' : /hev|hvc|h265/i.test(f.vcodec || '') ? 'HEVC' : f.vcodec || '';
+      const subtitle = [codec, f.fps ? `${Math.round(f.fps)} fps` : '', size].filter(Boolean).join(' · ');
+      const selected = String(f.id) === String(c.selectedFormatId);
+      return `<button class="q-chip format-choice${selected ? ' active' : ''}" aria-pressed="${selected}" data-click-action="pick-format" data-index="${idx}" data-format-id="${attr(String(f.id))}"><span class="format-copy"><strong>${esc(f.label)}</strong><small>${esc(subtitle)}</small></span><span class="format-check" aria-hidden="true">${uiIcon('check')}</span></button>`;
     }
     ).join('');
   }
 
   const options = c.options || {};
-  const advancedOptions = `<details class="advanced-options">
-    <summary>高级选项</summary>
-    <div class="advanced-grid">
-      ${!isAudio && !isImage ? `<label class="select-field"><span>封装</span><select data-change-action="set-option" data-index="${idx}" data-option="container"><option value="mp4"${options.container === 'mp4' ? ' selected' : ''}>MP4</option><option value="mkv"${options.container === 'mkv' ? ' selected' : ''}>MKV</option><option value="webm"${options.container === 'webm' ? ' selected' : ''}>WebM</option></select></label>` : ''}
-      ${isAudio ? `<label class="select-field"><span>音质</span><select data-change-action="set-option" data-index="${idx}" data-option="audio_quality"><option value="128"${options.audio_quality === '128' ? ' selected' : ''}>128 kbps</option><option value="192"${(options.audio_quality || '192') === '192' ? ' selected' : ''}>192 kbps</option><option value="256"${options.audio_quality === '256' ? ' selected' : ''}>256 kbps</option><option value="320"${options.audio_quality === '320' ? ' selected' : ''}>320 kbps</option></select></label>` : ''}
-      ${!isImage ? `<label class="check-field"><input type="checkbox" data-change-action="set-option" data-index="${idx}" data-option="metadata"${options.metadata ? ' checked' : ''}>写入元数据</label><label class="check-field"${webm && !isAudio ? ' title="WebM 不支持嵌入封面"' : ''}><input type="checkbox" data-change-action="set-option" data-index="${idx}" data-option="embed_thumbnail"${webm && !isAudio ? ' disabled' : options.embed_thumbnail ? ' checked' : ''}>嵌入封面</label>` : ''}
-      ${!isAudio && !isImage ? `<label class="check-field"><input type="checkbox" data-change-action="set-option" data-index="${idx}" data-option="subtitles"${options.subtitles ? ' checked' : ''}>嵌入字幕</label><label class="check-field"><input type="checkbox" data-change-action="set-option" data-index="${idx}" data-option="chapters"${options.chapters ? ' checked' : ''}>保留章节</label><label class="text-field"><span>字幕语言</span><input type="text" value="${attr(options.subtitle_languages || 'zh.*,en.*')}" data-change-action="set-option" data-index="${idx}" data-option="subtitle_languages"></label>` : ''}
+  const disclosureHeader = (title, detail) => `<summary><span class="disclosure-copy"><strong>${title}</strong><small>${esc(detail)}</small></span><svg class="disclosure-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3 5 5-5 5"/></svg></summary>`;
+  const chosenFormat = c.formats?.find(f => String(f.id) === String(c.selectedFormatId));
+  const formatOptions = !isAudio && !isImage && qualityChips ? `<details class="format-details option-section">${disclosureHeader('分辨率与编码', chosenFormat?.label || '自动匹配当前画质偏好')}<div class="option-content"><p class="option-hint">选择源视频提供的格式</p><div class="quality-row" aria-label="可用视频格式">${qualityChips}</div></div></details>` : '';
+  const optionSwitch = (key, title, hint, disabled = false) => `<label class="option-toggle${disabled ? ' unavailable' : ''}"><span class="option-copy"><span>${title}</span><small>${hint}</small></span><input type="checkbox" role="switch" aria-label="${title}" data-change-action="set-option" data-index="${idx}" data-option="${key}"${options[key] && !disabled ? ' checked' : ''}${disabled ? ' disabled' : ''}></label>`;
+  const enabledExtras = ['metadata', 'embed_thumbnail', ...(!isAudio ? ['subtitles', 'chapters'] : [])].filter(key => options[key]).length;
+  const advancedOptions = isImage ? '' : `<details class="advanced-options option-section">
+    ${disclosureHeader('高级选项', `${isAudio ? (options.audio_quality || '192') + ' kbps' : (options.container || 'mp4').toUpperCase()} · ${enabledExtras ? enabledExtras + ' 项附加内容' : '未添加附加内容'}`)}
+    <div class="option-content advanced-grid">
+      <div class="option-group">
+      ${!isAudio ? `<label class="option-select"><span class="option-copy"><span>文件格式</span><small>选择视频封装</small></span><select aria-label="文件格式" data-change-action="set-option" data-index="${idx}" data-option="container"><option value="mp4"${(options.container || 'mp4') === 'mp4' ? ' selected' : ''}>MP4</option><option value="mkv"${options.container === 'mkv' ? ' selected' : ''}>MKV</option><option value="webm"${options.container === 'webm' ? ' selected' : ''}>WebM</option></select></label>` : `<label class="option-select"><span class="option-copy"><span>音频质量</span><small>更高音质占用更多空间</small></span><select aria-label="音频质量" data-change-action="set-option" data-index="${idx}" data-option="audio_quality">${['128','192','256','320'].map(value => `<option value="${value}"${(options.audio_quality || '192') === value ? ' selected' : ''}>${value} kbps</option>`).join('')}</select></label>`}
+      </div>
+      <div class="option-group">
+        ${optionSwitch('metadata', '写入元数据', '保存标题、作者等媒体信息')}
+        ${optionSwitch('embed_thumbnail', '嵌入封面', webm && !isAudio ? 'WebM 不支持嵌入封面' : '在播放器中显示视频封面', webm && !isAudio)}
+        ${!isAudio ? optionSwitch('chapters', '保留章节', '按源视频章节浏览') : ''}
+      </div>
+      ${!isAudio ? `<div class="option-group">${optionSwitch('subtitles', '嵌入字幕', '保存源视频可用的字幕')}<label class="option-language"><span>字幕语言</span><input aria-label="字幕语言" type="text" spellcheck="false" value="${attr(options.subtitle_languages || 'zh.*,en.*')}" data-change-action="set-option" data-index="${idx}" data-option="subtitle_languages"><small>默认中文与英文；多个语言用逗号分隔。</small></label></div>` : ''}
     </div>
   </details>`;
 
@@ -715,7 +751,7 @@ function renderCard(idx) {
     actionHtml = `${fmtPills}
       ${!isAudio && !isImage ? rangePills : ''}
       ${!isAudio && !isImage ? presetPills : ''}
-      ${!isAudio && !isImage && qualityChips ? '<div class="quality-row">' + qualityChips + '</div>' : ''}
+      ${formatOptions}
       ${advancedOptions}
       <button class="card-dl-btn" data-click-action="download-card" data-index="${idx}">下载</button>`;
   } else if (c.status === 'queued') {
@@ -733,7 +769,7 @@ function renderCard(idx) {
     const total = p.total ? fmtSize(p.total) : '';
     const isPaused = c.status === 'paused';
     const isCancelling = c.status === 'cancelling';
-    const statusIcon = isPaused ? '⏸' : '<span class="spin"></span>';
+    const statusIcon = uiIcon(isPaused ? 'pause' : 'download');
     const phaseLabel = progressPhaseLabel(p.phase);
     const etaText = fmtEtaEstimate(p, isPaused);
     const progressDetail = phaseLabel ? etaText : [speed, etaText].filter(Boolean).join(' · ');
@@ -754,13 +790,13 @@ function renderCard(idx) {
   } else if (c.status === 'done') {
     const completed = completedDownloadFor(c, cardFmt);
     const completionStatus = completed
-      ? `<span class="card-status done">已保存：${esc(completed.filename || '')}</span>`
+      ? `<span class="card-status done">已保存：${esc(completed.filename || '')}${completed.mediaInfo?.dynamic_range ? ' · ' + esc(completed.mediaInfo.dynamic_range) : ''}</span>`
       : '';
     actionHtml = `${completionStatus}
       ${fmtPills}
       ${!isAudio && !isImage ? rangePills : ''}
       ${!isAudio && !isImage ? presetPills : ''}
-      ${!isAudio && !isImage && qualityChips ? '<div class="quality-row">' + qualityChips + '</div>' : ''}
+      ${formatOptions}
       ${advancedOptions}
       <div class="done-btns">
         <button class="card-dl-btn" data-click-action="download-card" data-index="${idx}">${completed ? '重新下载' : '下载'}</button>
@@ -769,22 +805,22 @@ function renderCard(idx) {
     actionHtml = `${fmtPills}
       ${!isAudio && !isImage ? rangePills : ''}
       ${!isAudio && !isImage ? presetPills : ''}
-      ${!isAudio && !isImage && qualityChips ? '<div class="quality-row">' + qualityChips + '</div>' : ''}
+      ${formatOptions}
       ${advancedOptions}
       <button class="card-dl-btn" data-click-action="download-card" data-index="${idx}">重试</button>
       <span class="card-status error">${esc(friendlyError(c.error || 'Download failed'))}</span>`;
   } else if (c.status === 'cancelled') {
-    actionHtml = `<span class="card-status error">已取消</span>
+    actionHtml = `<span class="card-status cancelled">已取消</span>
       ${fmtPills}
       ${!isAudio && !isImage ? rangePills : ''}
       ${!isAudio && !isImage ? presetPills : ''}
-      ${!isAudio && !isImage && qualityChips ? '<div class="quality-row">' + qualityChips + '</div>' : ''}
+      ${formatOptions}
       ${advancedOptions}
       <button class="card-dl-btn" data-click-action="download-card" data-index="${idx}">下载</button>`;
   }
 
   el.innerHTML = `
-    <div class="card-thumb">${thumbHtml}</div>
+    <div class="card-thumb${thumbUrl && !isAudio ? '' : ' placeholder-thumb'}">${thumbHtml}</div>
     <div class="card-body">
       <div class="card-title">${esc(c.title || '未命名媒体')}</div>
       <div class="card-meta">${esc(c.uploader)}${c.duration ? ' · ' + fmtDur(c.duration) : ''}</div>
@@ -795,6 +831,13 @@ function renderCard(idx) {
     </div>
   `;
   if (advancedOpen && el.querySelector('.advanced-options')) el.querySelector('.advanced-options').open = true;
+  if (formatsOpen && el.querySelector('.format-details')) el.querySelector('.format-details').open = true;
+  const qualityList = el.querySelector('.quality-row');
+  if (qualityList) qualityList.scrollTop = qualityScroll;
+  if (focused && (focused.clickAction || focused.changeAction)) {
+    const replacement = [...el.querySelectorAll('[data-click-action],[data-change-action]')].find(control => Object.entries(focused).every(([key, value]) => control.dataset[key] === value));
+    replacement?.focus({ preventScroll:true });
+  }
 }
 
 
@@ -932,6 +975,8 @@ async function dlCard(idx) {
         video_range_mode: requested.videoRangeMode || 'auto',
         preset: requested.preset,
         options: requested.options,
+        thumbnail: c.thumbnail,
+        youtube_engine: c.youtubeEngine,
         skip_browser_cookies: Boolean(c.skipBrowserCookies),
         title: c.title || '',
       }),
@@ -979,6 +1024,7 @@ function pollCard(idx, c = cardData[idx], jobId = c?.jobId) {
         c.completedDownloads = c.completedDownloads || {};
         c.completedDownloads[downloadRequestKey(completedRequest)] = {
           filename: data.filename,
+          mediaInfo: data.media_info,
           request: completedRequest,
         };
         c.status = 'done';
@@ -1032,9 +1078,9 @@ async function dlAll() {
   const btn = document.querySelector('.dl-all-btn');
   if (btn) { btn.disabled = true; btn.textContent = '正在下载...'; }
 
-  const batch = cardData;
+  const batch = cardData.slice();
   for (let i = 0; i < batch.length; i++) {
-    if (cardData !== batch) break;
+    if (cardData[i] !== batch[i]) break;
     if (batch[i].status === 'ready') {
       await dlCard(i);
     }
@@ -1066,20 +1112,19 @@ async function taskAction(id, action, extra = {}) {
     if (!response.ok || data.error) throw new Error(data.error || '任务操作失败');
     await refreshTaskCenter();
   } catch (error) {
+    window.mediaWorkspace?.message(friendlyError(error.message));
     setSettingsMsg('err', friendlyError(error.message), true);
   }
 }
 
 function taskButtons(task) {
   const id = attr(task.id);
-  if (task.status === 'starting' || task.status === 'interrupted') return `<button title="取消" data-click-action="task-action" data-job-id="${id}" data-task-action="cancel">&times;</button>`;
-  if (task.status === 'queued') return `<button title="上移" data-click-action="task-action" data-job-id="${id}" data-task-action="reorder" data-direction="up">&uarr;</button><button title="下移" data-click-action="task-action" data-job-id="${id}" data-task-action="reorder" data-direction="down">&darr;</button><button title="取消" data-click-action="task-action" data-job-id="${id}" data-task-action="cancel">&times;</button>`;
-  if (task.status === 'downloading' || task.status === 'paused') return `<button title="${task.status === 'paused' ? '继续' : '暂停'}" data-click-action="task-action" data-job-id="${id}" data-task-action="pause">${task.status === 'paused' ? '&#9654;' : '&#10074;&#10074;'}</button><button title="取消" data-click-action="task-action" data-job-id="${id}" data-task-action="cancel">&times;</button>`;
-  if (task.status === 'done') {
-    const file = attr(task.file || '');
-    return `<button title="在文件夹中显示" data-click-action="reveal-task-file" data-file-path="${file}">&#128193;</button><button title="重新下载" data-click-action="task-action" data-job-id="${id}" data-task-action="retry">&#8635;</button><button title="移除记录" data-click-action="task-action" data-job-id="${id}" data-task-action="delete">&times;</button>`;
-  }
-  return `<button title="重试" data-click-action="task-action" data-job-id="${id}" data-task-action="retry">&#8635;</button><button title="移除记录" data-click-action="task-action" data-job-id="${id}" data-task-action="delete">&times;</button>`;
+  const button = (action, label, icon, extra = '') => `<button title="${label}" aria-label="${label}" data-click-action="task-action" data-job-id="${id}" data-task-action="${action}" ${extra}>${uiIcon(icon)}</button>`;
+  if (task.status === 'starting' || task.status === 'interrupted') return button('cancel', '取消下载', 'close');
+  if (task.status === 'queued') return button('reorder', '上移', 'up', 'data-direction="up"') + button('reorder', '下移', 'down', 'data-direction="down"') + button('cancel', '取消下载', 'close');
+  if (task.status === 'downloading' || task.status === 'paused') return button('pause', task.status === 'paused' ? '继续下载' : '暂停下载', task.status === 'paused' ? 'play' : 'pause') + button('cancel', '取消下载', 'close');
+  if (task.status === 'done') return `<button title="在 Finder 中显示" aria-label="在 Finder 中显示" data-click-action="reveal-task-file" data-file-path="${attr(task.file || '')}">${uiIcon('folder')}</button>` + button('retry', '重新下载', 'retry') + button('delete', '移除记录', 'close');
+  return button('retry', '重试下载', 'retry') + button('delete', '移除记录', 'close');
 }
 
 async function revealTaskFile(filePath) {
@@ -1091,10 +1136,11 @@ async function refreshTaskCenter() {
   clearTimeout(taskRefreshTimer);
   let nextRefresh = 10000;
   try {
-    const response = await fetch('/api/jobs?limit=50');
+    const response = await fetch('/api/jobs?limit=200&include_active=1');
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || '无法读取任务');
     const tasks = data.jobs || [];
+    window.mediaWorkspace?.update(tasks);
     const center = document.getElementById('taskCenter');
     center.hidden = tasks.length === 0;
     if (!tasks.length) return;
@@ -1105,7 +1151,7 @@ async function refreshTaskCenter() {
     document.getElementById('taskSummary').textContent = `${active.length} 个进行中 · ${tasks.length} 条记录${average}`;
     document.getElementById('taskList').innerHTML = tasks.map(task => {
       const percent = Number.isFinite(task.progress?.percent) ? ` · ${task.progress.percent.toFixed(1)}%` : '';
-      const detail = task.error ? ` · ${esc(friendlyError(task.error))}` : '';
+      const detail = task.error ? ` · ${esc(friendlyError(task.error))}` : task.media_info?.dynamic_range ? ` · ${esc(task.media_info.dynamic_range)}` : '';
       return `<div class="task-row"><div><div class="task-title">${esc(task.title || task.filename || '未命名任务')}</div><div class="task-meta">${taskStatusLabels[task.status] || task.status} · ${(task.format || 'video').toUpperCase()}${percent}${detail}</div></div><div class="task-actions">${taskButtons(task)}</div></div>`;
     }).join('');
     if (taskCenterInitialized) {
@@ -1117,7 +1163,7 @@ async function refreshTaskCenter() {
       tasks.filter(task => task.status === 'done').forEach(task => notifiedJobs.add(task.id));
       taskCenterInitialized = true;
     }
-  } catch {} finally {
+  } catch { window.mediaWorkspace?.connectionLost(); } finally {
     taskRefreshTimer = setTimeout(refreshTaskCenter, nextRefresh);
   }
 }
@@ -1163,8 +1209,11 @@ document.addEventListener('change', event => {
   const target = event.target.closest('[data-change-action]');
   if (!target) return;
   switch (target.dataset.changeAction) {
+    case 'set-preset': setPreset(Number(target.dataset.index), target.value); break;
+    case 'set-video-range': setVideoRangeMode(Number(target.dataset.index), target.value); break;
     case 'save-concurrency': void saveConcurrency(); break;
     case 'change-auth-mode': void changeAuthMode(); break;
+    case 'save-youtube-mode': void postConfig({ youtube_enhanced: target.value === 'enhanced' }, '已更新 YouTube 模式，请重新解析链接').then(loadEngineStatus); break;
     case 'save-cookies': void saveCookies(); break;
     case 'set-option':
       setOption(

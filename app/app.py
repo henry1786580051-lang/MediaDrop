@@ -26,9 +26,13 @@ from flask import Flask, request, jsonify, send_file, render_template, redirect,
 from werkzeug.serving import make_server
 
 try:
+    import youtube_compat
+    from hdr_metadata import describe_format, inspect_file
     from data_lock import DataDirectoryLock
     from job_store import ACTIVE_STATUSES, JobStore, is_recoverable_job
 except ImportError:
+    from app import youtube_compat
+    from app.hdr_metadata import describe_format, inspect_file
     from app.data_lock import DataDirectoryLock
     from app.job_store import ACTIVE_STATUSES, JobStore, is_recoverable_job
 
@@ -106,6 +110,17 @@ def get_ytdlp_path():
         if version and (selected_version is None or compare_version_strings(version, selected_version) > 0):
             selected, selected_version = candidate, version
     return selected or "yt-dlp"
+
+
+def get_extractor_command(url, engine=None):
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    youtube = host in ("youtu.be", "youtube.com") or host.endswith(".youtube.com")
+    enabled = load_config().get("youtube_enhanced", youtube_compat.default_enabled())
+    if engine in ("sabr", "standard"):
+        enabled = engine == "sabr"
+    if youtube and enabled:
+        return youtube_compat.command(os.environ.get("MEDIADROP_JS_RUNTIME")), "sabr"
+    return [get_ytdlp_path()], "standard"
 
 
 def get_ffmpeg_dir():
@@ -224,9 +239,15 @@ def persist_job(job_id, force=False):
 
 def job_payload(job_id, job):
     progress = job.get("progress") or empty_progress()
+    file_path = job.get("file")
+    try:
+        file_size = os.path.getsize(file_path) if file_path and os.path.isfile(file_path) else None
+    except OSError:
+        file_size = None
+    missing = job.get("status") == "done" and file_path and file_size is None
     return {
         "id": job_id,
-        "status": job.get("status", "unknown"),
+        "status": "missing" if missing else job.get("status", "unknown"),
         "url": job.get("url", ""),
         "format": job.get("format", "video"),
         "format_id": job.get("format_id"),
@@ -236,6 +257,9 @@ def job_payload(job_id, job):
         "options": job.get("options") or {},
         "progress": progress,
         "filename": job.get("filename"),
+        "thumbnail": job.get("thumbnail"),
+        "file_size": file_size,
+        "media_info": job.get("media_info"),
         "file": job.get("file") if job.get("file") and os.path.isfile(job.get("file")) else None,
         "error": job.get("error"),
         "error_code": job.get("error_code"),
@@ -278,6 +302,7 @@ def apply_security_headers(response):
 
 def cleanup_all_jobs():
     """Stop child processes while preserving resumable task caches."""
+    youtube_compat.provider.close()
     with queue_lock, jobs_lock:
         if shutdown_event.is_set():
             return
@@ -537,8 +562,10 @@ def load_config():
         "download_dir": default_dir,
         "proxy_url": "",
         "cookies_browser": "",
+        "youtube_enhanced": youtube_compat.default_enabled(),
         "cookies_file": "",
         "max_concurrent": DEFAULT_MAX_CONCURRENT_DOWNLOADS,
+        "ui_appearance": "system", "ui_density": "comfortable", "ui_quality": "highest",
     }
     config_file = os.path.join(get_base_dir(), "config.json")
     with config_lock:
@@ -1601,8 +1628,9 @@ def build_download_command(
     validate_download_options(format_choice, preset, options)
     out_template = os.path.join(job_cache_dir, f"{job_id}.%(ext)s")
 
-    cmd = [
-        get_ytdlp_path(),
+    cmd, youtube_engine = get_extractor_command(url, options.get("youtube_engine"))
+    cmd = list(cmd)
+    cmd += [
         "--no-playlist",
         "--newline",
         "--progress",
@@ -1698,6 +1726,13 @@ def build_download_command(
         if options.get("embed_thumbnail"):
             cmd.append("--embed-thumbnail")
 
+    if youtube_engine == "sabr" and format_choice != "image":
+        if "-f" in cmd:
+            index = cmd.index("-f") + 1
+            cmd[index] = re.sub(r"\b(bestvideo|bestaudio|worstvideo|worstaudio|best|worst)\b",
+                                r"\1[protocol=sabr]", cmd[index])
+        else:
+            cmd += ["-f", "bestaudio[protocol=sabr]"]
     cmd.append(url)
     return cmd, ext, proxy
 
@@ -1799,6 +1834,14 @@ def run_download(
         if not chosen:
             raise RuntimeError(f"Download completed without the expected {ext} file")
 
+        if format_choice == "video":
+            with jobs_lock:
+                job["progress"] = estimator.set_phase("verifying")
+            media_info = inspect_downloaded_video(chosen)
+            with jobs_lock:
+                ensure_download_active(job)
+                job["media_info"] = media_info
+
         # Publish only the fully completed media file. Partials and intermediate
         # streams remain isolated in the task cache and are removed in finally.
         finalize_cached_file(
@@ -1854,25 +1897,18 @@ def index():
     return response
 
 
-def describe_dynamic_range(fmt):
-    dynamic_range = str(fmt.get("dynamic_range") or "").strip()
-    note = str(fmt.get("format_note") or "")
-    transfer = str(fmt.get("color_transfer") or "").lower()
-    combined = f"{dynamic_range} {note}".upper()
+def describe_dynamic_range(fmt, youtube=False):
+    return describe_format(fmt, youtube=youtube)
 
-    if "DOLBY VISION" in combined or re.search(r"\bDV\b", combined):
-        return True, "Dolby Vision"
-    if "HDR10+" in combined:
-        return True, "HDR10+"
-    if "HLG" in combined or "arib-std-b67" in transfer:
-        return True, "HLG"
-    if "HDR10" in combined or "PQ" in combined or "smpte2084" in transfer:
-        return True, "HDR10"
-    if dynamic_range and dynamic_range.upper() not in ("SDR", "UNKNOWN"):
-        return True, dynamic_range.upper()
-    if "HDR" in combined:
-        return True, "HDR"
-    return False, "SDR"
+
+def inspect_downloaded_video(path):
+    bundled = get_ffmpeg_dir()
+    name = "ffprobe.exe" if sys.platform == "win32" else "ffprobe"
+    probes = [os.path.join(bundled, name)] if bundled else []
+    system = shutil.which(name)
+    if system:
+        probes.append(system)
+    return inspect_file(path, probes)
 
 
 def is_better_format(candidate, existing):
@@ -1912,6 +1948,7 @@ def normalize_download_options(value):
         "chapters": bool(value.get("chapters")),
         "embed_thumbnail": bool(value.get("embed_thumbnail")),
         "skip_browser_cookies": bool(value.get("skip_browser_cookies")),
+        "youtube_engine": value.get("youtube_engine") if value.get("youtube_engine") in ("sabr", "standard") else None,
     }
 
 
@@ -1925,7 +1962,8 @@ def get_info():
         return jsonify({"error": "Invalid URL"}), 400
 
     try:
-        cmd = [get_ytdlp_path(), "--no-playlist", "-j"]
+        cmd, youtube_engine = get_extractor_command(url)
+        cmd += ["--no-playlist", "-j"]
         cmd += get_ytdlp_javascript_args()
         cmd.append(url)
         proxy = get_proxy_url()
@@ -1994,14 +2032,21 @@ def get_info():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-    # Keep one best stream for each resolution and dynamic-range variant.
+    # Preserve codec, frame-rate and audio variants; deduplicate equivalent transports only.
     best_by_variant = {}
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    youtube = (
+        host in ("youtu.be", "youtube.com") or host.endswith(".youtube.com")
+        or str(info.get("extractor_key", "")).lower() == "youtube"
+    )
     for f in info.get("formats", []):
+        if youtube_engine == "sabr" and f.get("protocol") != "sabr":
+            continue
         height = f.get("height")
         vcodec = f.get("vcodec") or ""
         if height and vcodec and vcodec != "none":
-            is_hdr, range_label = describe_dynamic_range(f)
-            key = (height, range_label)
+            is_hdr, range_label = describe_dynamic_range(f, youtube=youtube)
+            key = (height, range_label, re.split(r"[.]", vcodec.lower())[0], f.get("fps") or 0, f.get("acodec") or "none")
             existing = best_by_variant.get(key)
             if not existing or is_better_format(f, existing):
                 enriched = dict(f)
@@ -2010,7 +2055,7 @@ def get_info():
                 best_by_variant[key] = enriched
 
     formats = []
-    for (height, _), f in best_by_variant.items():
+    for (height, *_), f in best_by_variant.items():
         formats.append({
             "id": f["format_id"],
             "label": f"{height}p {f['_range_label']}",
@@ -2025,7 +2070,7 @@ def get_info():
             "filesize_is_estimate": not bool(f.get("filesize")),
             "tbr": f.get("tbr"),
         })
-    formats.sort(key=lambda x: (x["height"], x["hdr"]), reverse=True)
+    formats.sort(key=lambda x: (x["height"], x["hdr"], x["fps"] or 0, x["vcodec"]), reverse=True)
 
     return jsonify({
         "title": info.get("title", ""),
@@ -2034,6 +2079,7 @@ def get_info():
         "uploader": info.get("uploader", ""),
         "formats": formats,
         "has_hdr": any(f["hdr"] for f in formats),
+        "youtube_engine": youtube_engine,
         "skip_browser_cookies": skip_browser_cookies,
         "cookie_warning": cookie_warning,
     })
@@ -2050,6 +2096,8 @@ def start_download():
     preset = str(data.get("preset", "recommended")).lower()
     options = normalize_download_options(data.get("options"))
     options["skip_browser_cookies"] = bool(data.get("skip_browser_cookies"))
+    if data.get("youtube_engine") in ("sabr", "standard"):
+        options["youtube_engine"] = data["youtube_engine"]
 
     if not url:
         return jsonify({"error": "No URL provided"}), 400
@@ -2080,6 +2128,7 @@ def start_download():
             "format_id": format_id,
             "video_range_mode": video_range_mode,
             "title": title,
+            "thumbnail": str(data.get("thumbnail") or "")[:2048],
             "preset": preset,
             "options": options,
             "progress": empty_progress(),
@@ -2109,6 +2158,7 @@ def check_status(job_id):
         "error_code": job.get("error_code"),
         "resumable": bool(job.get("resumable")),
         "filename": job.get("filename"),
+        "media_info": job.get("media_info"),
         "progress": job.get("progress", {}),
     }
     return jsonify(resp)
@@ -2207,7 +2257,38 @@ def list_jobs():
     with jobs_lock:
         job_items = list(jobs.items())
     ordered = sorted(job_items, key=lambda item: item[1].get("created_at", 0), reverse=True)
-    return jsonify({"jobs": [job_payload(job_id, job) for job_id, job in ordered[:limit]]})
+    selected = ordered[:limit]
+    if request.args.get("include_active") == "1":
+        selected_ids = {job_id for job_id, _ in selected}
+        selected += [(job_id, job) for job_id, job in ordered[limit:]
+                     if job_id not in selected_ids and job.get("status") in ACTIVE_STATUSES]
+    return jsonify({"jobs": [job_payload(job_id, job) for job_id, job in selected]})
+
+
+@app.route("/api/jobs/<job_id>/locate", methods=["POST"])
+def locate_job_file(job_id):
+    data = request.get_json(silent=True) or {}
+    path = data.get("file")
+    if not isinstance(path, str) or not os.path.isabs(path):
+        return jsonify({"error": "请选择有效的媒体文件。"}), 400
+    path = os.path.realpath(path)
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+        if job.get("status") not in ("missing", "done"):
+            return jsonify({"error": "只能重新定位已完成的文件。"}), 409
+        format_choice = job.get("format", "video")
+    extensions = {"video": {".mp4", ".mkv", ".webm", ".mov"}, "audio": {".mp3", ".m4a", ".opus", ".wav"}, "image": {".jpg", ".jpeg", ".png", ".webp"}}
+    if not os.path.isfile(path) or os.path.splitext(path)[1].lower() not in extensions.get(format_choice, set()):
+        return jsonify({"error": "文件不存在或与任务的媒体类型不符。"}), 400
+    media_info = inspect_downloaded_video(path) if format_choice == "video" else None
+    with jobs_lock:
+        if jobs.get(job_id) is not job or job.get("status") not in ("missing", "done"):
+            return jsonify({"error": "任务状态已改变，请重试。"}), 409
+        job.update(file=path, filename=os.path.basename(path), status="done", error=None, error_code=None, media_info=media_info)
+    persist_job(job_id, force=True)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/jobs/<job_id>/retry", methods=["POST"])
@@ -2242,6 +2323,7 @@ def retry_job(job_id):
                 "format_id": source.get("format_id"),
                 "video_range_mode": source.get("video_range_mode", "auto"),
                 "title": source.get("title", ""),
+                "thumbnail": source.get("thumbnail", ""),
                 "preset": source.get("preset", "recommended"),
                 "options": source.get("options") or {},
                 "progress": empty_progress(),
@@ -2289,6 +2371,17 @@ def reorder_queue():
     return jsonify(payload)
 
 
+@app.route("/api/engines")
+def engine_status():
+    binary = youtube_compat.engine_path()
+    enabled = load_config().get("youtube_enhanced", youtube_compat.default_enabled())
+    return jsonify({"youtube": {
+        "mode": "sabr" if enabled else "standard",
+        "version": cached_ytdlp_version(str(binary)) if binary.is_file() else None,
+        "available": binary.is_file(), "update_method": "application",
+    }})
+
+
 @app.route("/api/ytdlp/version")
 def ytdlp_version():
     try:
@@ -2316,7 +2409,11 @@ def test_cookies():
     if not is_valid_url(url):
         return jsonify({"error": "Invalid URL"}), 400
 
-    cmd = [get_ytdlp_path(), "--no-playlist", "--simulate", "--skip-download", "--dump-json"]
+    try:
+        cmd, _ = get_extractor_command(url)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    cmd += ["--no-playlist", "--simulate", "--skip-download", "--dump-json"]
     cmd += get_ytdlp_javascript_args()
     cmd.append(url)
     proxy = get_proxy_url()
@@ -2482,6 +2579,17 @@ def config():
                 return jsonify({"error": "Proxy URL must include a supported scheme, host, and port"}), 400
             updates["proxy_url"] = proxy_url
 
+        for key, allowed in {"ui_appearance": {"system", "light", "dark"}, "ui_density": {"comfortable", "compact"}, "ui_quality": {"highest", "recommended", "compatible"}}.items():
+            if key in data:
+                if not isinstance(data[key], str) or data[key] not in allowed:
+                    return jsonify({"error": "Invalid interface preference"}), 400
+                updates[key] = data[key]
+
+        if "youtube_enhanced" in data:
+            if not isinstance(data["youtube_enhanced"], bool):
+                return jsonify({"error": "Invalid YouTube mode"}), 400
+            updates["youtube_enhanced"] = data["youtube_enhanced"]
+
         if "cookies_browser" in data:
             browser = data["cookies_browser"].strip().lower()
             if browser not in VALID_BROWSERS:
@@ -2512,6 +2620,8 @@ def config():
         return jsonify({
             "download_dir": cfg["download_dir"],
             "proxy_url": cfg["proxy_url"],
+            "youtube_enhanced": cfg.get("youtube_enhanced", youtube_compat.default_enabled()),
+            **{key: cfg.get(key, default) for key, default in (("ui_appearance", "system"), ("ui_density", "comfortable"), ("ui_quality", "highest"))},
             "cookies_browser": cfg["cookies_browser"],
             "cookies_file": cfg["cookies_file"],
             "max_concurrent": cfg["max_concurrent"],
@@ -2521,6 +2631,8 @@ def config():
     return jsonify({
         "download_dir": cfg["download_dir"],
         "proxy_url": cfg["proxy_url"],
+        "youtube_enhanced": cfg.get("youtube_enhanced", youtube_compat.default_enabled()),
+        **{key: cfg.get(key, default) for key, default in (("ui_appearance", "system"), ("ui_density", "comfortable"), ("ui_quality", "highest"))},
         "cookies_browser": cfg["cookies_browser"],
         "cookies_file": cfg["cookies_file"],
         "max_concurrent": cfg["max_concurrent"],

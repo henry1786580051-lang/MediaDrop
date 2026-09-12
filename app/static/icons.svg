@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg">
+<symbol id="sidebar" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></symbol>
+<symbol id="inspector" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></symbol>
+<symbol id="library" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></symbol>
+<symbol id="download" viewBox="0 0 24 24"><path d="M12 3v12m-4-4 4 4 4-4M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></symbol>
+<symbol id="check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/></symbol>
+<symbol id="warning" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v6m0 3h.01"/></symbol>
+<symbol id="gear" viewBox="0 0 24 24"><path d="m9.5 3-.6 2.1-2 .9-2-.6-2.3 4 1.5 1.5v2.2l-1.5 1.5 2.3 4 2-.6 2 .9.6 2.1h5l.6-2.1 2-.9 2 .6 2.3-4-1.5-1.5v-2.2l1.5-1.5-2.3-4-2 .6-2-.9-.6-2.1z"/><circle cx="12" cy="12" r="3"/></symbol>
+<symbol id="plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+<symbol id="close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+<symbol id="folder" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7h18"/></symbol>
+<symbol id="video" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="m10 8 6 4-6 4z"/></symbol>
+<symbol id="audio" viewBox="0 0 24 24"><path d="M5 9v6m4-10v14m4-16v18m4-14v10m4-7v4"/></symbol>
+<symbol id="image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8" cy="8" r="1.5"/><path d="m4 17 5-5 4 4 3-3 5 5"/></symbol>
+<symbol id="chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+<symbol id="retry" viewBox="0 0 24 24"><path d="M4 10a8 8 0 1 1 1 7M4 4v6h6"/></symbol>
+<symbol id="pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+<symbol id="play" viewBox="0 0 24 24"><path d="m8 4 12 8-12 8z"/></symbol>
+<symbol id="up" viewBox="0 0 24 24"><path d="m6 14 6-6 6 6"/></symbol>
+<symbol id="down" viewBox="0 0 24 24"><path d="m6 10 6 6 6-6"/></symbol>
+<symbol id="link" viewBox="0 0 24 24"><path d="m10 14 4-4m-5 6-2 2a4.2 4.2 0 0 1-6-6l4-4a4.2 4.2 0 0 1 6 0m2 0 2-2a4.2 4.2 0 0 1 6 6l-4 4a4.2 4.2 0 0 1-6 0" transform="translate(1 -1)"/></symbol>
+</svg>
